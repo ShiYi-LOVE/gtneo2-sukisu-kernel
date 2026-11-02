@@ -97,6 +97,9 @@ python3 "$ORIGINAL/kconfig_stubs.py" || echo "!! 占位脚本异常，继续构�
 echo "==> [3c] 应用 susfs realme 适配补丁 (官方 hunk 不兼容 Oplus 源码的 5 处)..."
 python3 "$ORIGINAL/fix_susfs.py" || echo "!! susfs 适配脚本异常，继续构建"
 
+echo "==> [3d] 自动扫描缺失头文件的 include, 删除对应 OPLUS 白名单宏..."
+python3 "$ORIGINAL/fix_oplus_macros.py" || echo "!! 宏清理脚本异常，继续构建"
+
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
 mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
 for i in 1 2 3 4 5; do
@@ -114,13 +117,13 @@ clang --version | head -1
 echo "==> [5/7] 配置内核: $DEFCONFIG..."
 configure_kernel
 
-echo "==> [6/7] 编译 Image.gz + dtbs (jobs=$JOBS)..."
+echo "==> [6/7] 编译 Image.gz + dtbs (jobs=$JOBS, GNU as —— 4.19 老内核不兼容 LLVM 集成汇编器)..."
 BUILD_FLAGS=(O=out ARCH=arm64 SUBARCH=arm64
   CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
   LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-)
 
-if ! make "${BUILD_FLAGS[@]}" LLVM_IAS=1 -j"$JOBS" Image.gz dtbs; then
-  echo "!! LLVM_IAS=1 编译失败，回退 GNU as 重新编译..."
+if ! make "${BUILD_FLAGS[@]}" -j"$JOBS" Image.gz dtbs; then
+  echo "!! 编译失败，清理后重试一次..."
   rm -rf out
   configure_kernel
   make "${BUILD_FLAGS[@]}" -j"$JOBS" Image.gz dtbs
