@@ -31,7 +31,8 @@ for dirpath, dirnames, filenames in os.walk(".", followlinks=False):
             text = (pathlib.Path(dirpath) / fn).read_text(errors="ignore")
         except OSError:
             continue
-        for m in re.finditer(r'^\s*source\s+"([^"]+)"', text, re.M):
+        # 匹配带引号与不带引号两种 source 写法 (Oplus 源码两种都有)
+        for m in re.finditer(r'^\s*source\s+"?([^"\s]+?)"?\s*$', text, re.M):
             s = m.group(1)
             if "$" not in s and "/" in s:
                 src_refs.add(s)
@@ -76,9 +77,12 @@ if not fixed:
 created = []
 for s in sorted(src_refs):
     target = pathlib.Path(s)
-    if target.is_file() or target.is_symlink():
+    if target.is_file():
         continue
     try:
+        # 路径本身是符号链接 (无论失效或指向缺 Kconfig 的目录) -> 移除后重建
+        if target.is_symlink():
+            target.unlink()
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("")
         created.append(s)
