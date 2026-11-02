@@ -39,12 +39,22 @@ for dirpath, dirnames, filenames in os.walk(".", followlinks=False):
 
 dir_kconfig_refs = {s.rsplit("/Kconfig", 1)[0] for s in src_refs if s.endswith("/Kconfig")}
 
-# kernel/Makefile 里 obj-* 引用的子目录 (子目录里通常还要有 Makefile)
+# 全树所有 Makefile 里 obj-* 引用的子目录 (以 "dir/" 形式出现的都会被 make 当目录处理)
 obj_dirs = set()
-kmake = pathlib.Path("kernel/Makefile")
-if kmake.exists():
-    for m in re.finditer(r"^obj-\$\(CONFIG_\w+\)\s*\+=\s*(\S+)/?\s*$", kmake.read_text(), re.M):
-        obj_dirs.add(m.group(1).rstrip("/"))
+for dirpath, dirnames, filenames in os.walk(".", followlinks=False):
+    if ".git" in dirpath:
+        continue
+    for fn in filenames:
+        if not fn.startswith("Makefile"):
+            continue
+        try:
+            text = (pathlib.Path(dirpath) / fn).read_text(errors="ignore")
+        except OSError:
+            continue
+        for m in re.finditer(r"^obj-\$\(CONFIG_\w+\)\s*\+=\s*(.+)$", text, re.M):
+            for tok in m.group(1).split():
+                if tok.endswith("/"):
+                    obj_dirs.add(os.path.normpath(os.path.join(dirpath, tok)))
 
 # 1) 失效符号链接 -> 删除并按引用方式重建 (跑两轮处理嵌套)
 fixed = []
@@ -62,6 +72,7 @@ for _round in range(2):
                     p.mkdir(parents=True, exist_ok=True)
                     (p / "Kconfig").touch()
                     (p / "Makefile").touch()
+                    # 确保父级 Makefile 引用形如 "dir/" 的目录条目可解析
                 else:
                     p.write_text("")
                 fixed.append(f"{rel} -> {target}")
