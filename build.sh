@@ -45,7 +45,14 @@ configure_kernel() {
 }
 
 echo "==> [1/7] 拉取真我官方 Android T 内核源码 (kernel 4.19.157)..."
-git clone --depth=1 "$KERNEL_URL" kernel
+rm -rf kernel ../susfs ../ak3 out
+for i in 1 2 3 4 5; do
+  git clone --depth=1 "$KERNEL_URL" kernel && break
+  echo "!! kernel clone 失败 (第 $i 次)，重试..."
+  rm -rf kernel
+  sleep 10
+done
+[ -d kernel ] || { echo "FATAL: kernel 源码拉取失败"; exit 1; }
 cd kernel
 
 # Oplus Makefile 用 Python2 语法写的 gcc-wrapper.py 包裹编译器，新系统无 python2 会直接报错
@@ -54,10 +61,22 @@ sed -i 's|$(PYTHON) $(srctree)/scripts/gcc-wrapper.py ||' Makefile
 grep -n "^CC" Makefile | head -3
 
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+for i in 1 2 3 4 5; do
+  curl -LSs --retry 5 --retry-delay 5 --retry-all-errors \
+    "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main && break
+  echo "!! setup.sh 拉取失败 (第 $i 次)，重试..."
+  sleep 10
+done
+[ -d drivers/kernelsu ] || { echo "FATAL: SukiSU 集成失败"; exit 1; }
 
 echo "==> [3/7] 应用 SusFS 补丁 (kernel-4.19 分支)..."
-git clone --depth=1 -b kernel-4.19 "$SUSFS_URL" ../susfs
+for i in 1 2 3 4 5; do
+  git clone --depth=1 -b kernel-4.19 "$SUSFS_URL" ../susfs && break
+  echo "!! susfs clone 失败 (第 $i 次)，重试..."
+  rm -rf ../susfs
+  sleep 10
+done
+[ -d ../susfs ] || { echo "FATAL: susfs 仓库拉取失败"; exit 1; }
 patch -p1 --forward < ../susfs/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
   || echo "!! 部分 hunk 已应用或失败，继续检查核心文件..."
 # 兜底：确保 susfs 核心文件就位
@@ -74,7 +93,12 @@ python3 "$ORIGINAL/fix_susfs.py" || echo "!! susfs 适配脚本异常，继续�
 
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
 mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
-curl -LOs "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+for i in 1 2 3 4 5; do
+  curl -LOs --retry 5 --retry-delay 5 --retry-all-errors \
+    "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman" && break
+  echo "!! antman 拉取失败 (第 $i 次)，重试..."
+  sleep 10
+done
 chmod +x antman
 ./antman -S=latest
 cd - > /dev/null
@@ -101,7 +125,12 @@ BOOT="$PWD/out/arch/arm64/boot"
 find "$BOOT/dts" -name '*.dtb' -type f | sort | xargs cat > "$BOOT/dtb.concat"
 cat "$BOOT/Image.gz" "$BOOT/dtb.concat" > "$BOOT/Image.gz-dtb"
 
-git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ../ak3
+for i in 1 2 3 4 5; do
+  git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ../ak3 && break
+  echo "!! AnyKernel3 clone 失败 (第 $i 次)，重试..."
+  rm -rf ../ak3
+  sleep 10
+done
 rm -rf ../ak3/.git
 cp "$ORIGINAL/ak3/anykernel.sh" ../ak3/anykernel.sh
 cp "$BOOT/Image.gz-dtb" ../ak3/
