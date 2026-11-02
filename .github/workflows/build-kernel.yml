@@ -1,0 +1,50 @@
+name: Build GT Neo 2 Kernel (SukiSU-Ultra + SusFS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfigs:
+        description: "defconfig 列表（空格分隔）"
+        required: false
+        default: "vendor/kona-perf_defconfig vendor/kona_defconfig"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          echo "matrix=$(echo "${{ github.event.inputs.defconfigs }}" | tr ' ' '\n' | jq -R '{defconfig: ., tag: (sub("vendor/";"") | sub("_defconfig";""))}' | jq -sc .)" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git \
+            libssl-dev make zip jq patch python3
+
+      - name: Build kernel (${{ matrix.defconfig }})
+        run: |
+          chmod +x build.sh
+          ./build.sh "${{ matrix.defconfig }}" "${{ matrix.tag }}"
+
+      - name: Upload AK3 flashable zip + Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: AK3-gtneo2-${{ matrix.tag }}-SukiSU-susfs
+          path: |
+            out/AK3-*.zip
+            out/Image.gz-dtb
+            out/kernel.config
+          if-no-files-found: error
