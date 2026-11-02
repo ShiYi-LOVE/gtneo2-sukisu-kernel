@@ -108,8 +108,10 @@ for i in 1 2 3 4 5; do
   sleep 10
 done
 if [ -d ../bitra-ref ]; then
+  # 整体替换 include/soc/oplus (占位脚本可能已把其中符号链接重建为空文件, 必须先删干净)
+  rm -rf include/soc/oplus
   mkdir -p include/soc/oplus
-  cp -rf ../bitra-ref/include/soc/oplus/. include/soc/oplus/ 2>/dev/null || true
+  cp -rf ../bitra-ref/include/soc/oplus/. include/soc/oplus/
   echo "  restored: include/soc/oplus/"
   for d in system device_info sensor thermal; do
     if [ -d "../bitra-ref/drivers/soc/oplus/$d" ]; then
@@ -118,7 +120,7 @@ if [ -d ../bitra-ref ]; then
       echo "  restored: drivers/soc/oplus/$d"
     fi
   done
-  ls include/soc/oplus/system/oplus_project.h drivers/soc/oplus/system/ | head -5
+  [ -f include/soc/oplus/system/oplus_project.h ] || echo "!! 警告: oplus_project.h 回填失败, 后续编译可能报缺失"
 else
   echo "!! bitra-ref 不可用，缺失组件按空 stub 处理"
 fi
