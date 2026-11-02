@@ -66,6 +66,26 @@ cp -f ../susfs/kernel_patches/include/linux/susfs.h include/linux/ 2>/dev/null |
 cp -f ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/ 2>/dev/null || true
 ls fs/susfs.c include/linux/susfs.h
 
+echo "==> [3b] Kconfig 占位修复 (Oplus 发布源码缺失的 Kconfig 文件)..."
+grep -rhoE '^[[:space:]]*source "[^"]+"' --include='Kconfig*' . 2>/dev/null \
+  | sed 's/.*source "//;s/"$//' | sort -u | while read -r src; do
+    if [ ! -f "$src" ]; then
+      mkdir -p "$(dirname "$src")"
+      : > "$src"
+      echo "  stub: $src"
+    fi
+  done
+# kernel/Makefile 里 obj-y 无条件引用的空目录必须有 Makefile
+for d in kernel/sched_assist kernel/tuning kernel/special_opt; do
+  if [ -d "$d" ] && [ ! -f "$d/Makefile" ]; then
+    : > "$d/Makefile"
+    echo "  stub: $d/Makefile"
+  fi
+done
+
+echo "==> [3c] 应用 susfs realme 适配补丁 (官方 hunk 不兼容 Oplus 源码的 5 处)..."
+python3 "$ORIGINAL/fix_susfs.py"
+
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
 mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
 curl -LOs "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
