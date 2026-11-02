@@ -60,6 +60,12 @@ cd kernel
 sed -i 's|$(PYTHON) $(srctree)/scripts/gcc-wrapper.py ||' Makefile
 grep -n "^CC" Makefile | head -3
 
+# OplusKernelEnvConfig.mk 白名单宏 OPLUS_FEATURE_SCHED_ASSIST 会激活 mutex.h 等核心头文件
+# 对闭源 vendor 头文件的 include (头文件从未开源) —— 从白名单删除, 整个功能编译跳过
+# (与社区 bitra 内核做法一致: sched_assist 闭源调度整体禁用)
+sed -i '/OPLUS_FEATURE_SCHED_ASSIST/d' OplusKernelEnvConfig.mk
+echo "OplusKernelEnvConfig.mk: SCHED_ASSIST macro removed"
+
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
 for i in 1 2 3 4 5; do
   curl -LSs --retry 5 --retry-delay 5 --retry-all-errors \
