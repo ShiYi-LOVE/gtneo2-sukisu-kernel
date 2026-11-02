@@ -52,6 +52,51 @@ if p.exists():
         p.write_text(t)
         patched.append("mm/vmscan.c: PROCESS_RECLAIM call-site disabled")
 
+# 4) fs/proc/meminfo.c: 无条件 include <linux/healthinfo/ion.h> (官方守卫被注释掉),
+#    healthinfo 实现整体闭源未发布 —— 注释掉该 include, ION 统计行随
+#    OPLUS_FEATURE_HEALTHINFO 宏删除一并编译跳过 (还原主线 stock /proc/meminfo)
+for meminfo in ("fs/proc/meminfo.c",):
+    p = pathlib.Path(meminfo)
+    if p.exists():
+        t = p.read_text(errors="ignore")
+        inc = "#include <linux/healthinfo/ion.h>"
+        if inc in t:
+            t = t.replace(inc, "/* healthinfo ion.h include removed: closed-source impl */")
+            p.write_text(t)
+            patched.append(f"{meminfo}: commented out unconditional healthinfo/ion.h include")
+
+# 5) kernel/sched/cputime.c: account_task_time 调用点守卫 OPLUS_FEATURE_TASK_CPUSTATS,
+#    其实现 fs/proc/task_cpustats 闭源未发布 (defconfig 中 #ifdef 包 CONFIG 行无效,
+#    CONFIG_OPLUS_CTP/SCHED 实际未开启) —— 宏已在白名单删除, 此处兜底禁用守卫
+p = pathlib.Path("kernel/sched/cputime.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "#ifdef OPLUS_FEATURE_TASK_CPUSTATS" in t:
+        t = t.replace("#ifdef OPLUS_FEATURE_TASK_CPUSTATS",
+                      "#if 0 /* OPLUS_FEATURE_TASK_CPUSTATS removed: closed-source impl */")
+        p.write_text(t)
+        patched.append("kernel/sched/cputime.c: TASK_CPUSTATS call-sites disabled")
+
+# 6) 全树兜底: 注释掉对已知闭源头文件的无条件 include
+#    (healthinfo/*, task_cpustats.h —— 对应实现/头文件均未开源)
+DEAD_HEADERS = ("#include <linux/healthinfo/", "#include <linux/task_cpustats.h>")
+count = 0
+for pat in ("fs/proc/*.c", "kernel/sched/*.c", "mm/*.c"):
+    for f in pathlib.Path(".").glob(pat):
+        try:
+            t = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        orig = t
+        for h in DEAD_HEADERS:
+            if h in t:
+                t = t.replace(h, "/* " + h + " skipped: closed-source */")
+        if t != orig:
+            f.write_text(t)
+            count += 1
+if count:
+    patched.append(f"global: commented dead-header includes in {count} file(s)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
