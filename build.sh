@@ -46,13 +46,20 @@ configure_kernel() {
 
 echo "==> [1/7] 拉取真我官方 Android T 内核源码 (kernel 4.19.157)..."
 rm -rf kernel ../susfs ../ak3 out
-for i in 1 2 3 4 5; do
-  git clone --depth=1 "$KERNEL_URL" kernel && break
-  echo "!! kernel clone 失败 (第 $i 次)，重试..."
+# 多源回退: 直连 -> 镜像加速 (VM/弱网环境 github 直连常被 reset)
+KERNEL_URLS=("$KERNEL_URL"
+  "https://gh-proxy.com/$KERNEL_URL"
+  "https://ghproxy.net/$KERNEL_URL"
+  "https://gitclone.com/github.com/realme-kernel-opensource/realme_GTneo2-Q5pro-GTMasterExploratory-AndroidT-kernel-source")
+CLONE_OK=""
+for i in 1 2 3 4 5 6; do
+  u="${KERNEL_URLS[$(( (i-1) % ${#KERNEL_URLS[@]} ))]}"
+  echo "  clone 尝试 $i: $u"
+  if git clone --depth=1 "$u" kernel; then CLONE_OK="yes"; break; fi
   rm -rf kernel
   sleep 10
 done
-[ -d kernel ] || { echo "FATAL: kernel 源码拉取失败"; exit 1; }
+[ -n "$CLONE_OK" ] || { echo "FATAL: kernel 源码拉取失败"; exit 1; }
 cd kernel
 
 # Oplus Makefile 用 Python2 语法写的 gcc-wrapper.py 包裹编译器，新系统无 python2 会直接报错
@@ -60,17 +67,24 @@ cd kernel
 sed -i 's|$(PYTHON) $(srctree)/scripts/gcc-wrapper.py ||' Makefile
 grep -n "^CC" Makefile | head -3
 
-# OplusKernelEnvConfig.mk 白名单宏 OPLUS_FEATURE_SCHED_ASSIST 会激活 mutex.h 等核心头文件
-# 对闭源 vendor 头文件的 include (头文件从未开源) —— 从白名单删除, 整个功能编译跳过
-# (与社区 bitra 内核做法一致: sched_assist 闭源调度整体禁用)
+# OplusKernelEnvConfig.mk 白名单宏会激活引用闭源头文件的核心代码:
+#   - SCHED_ASSIST -> mutex.h 闭源调度
+#   - VIRTUAL_RESERVE_MEMORY -> linux/reserve_area.h + fs/proc/va_feature_node.h (均未开源)
+#     且官方 defconfig 本就未开启 CONFIG_VIRTUAL_RESERVE_MEMORY, 出厂编译时该特性守卫即为 false
+# 从白名单删除宏 = 整个功能编译跳过, 与官方出厂行为一致
 sed -i -e '/OPLUS_FEATURE_SCHED_ASSIST/d' -e '/OPLUS_FEATURE_MULTI_FREEAREA/d' \
-       -e '/OPLUS_FEATURE_PROCESS_RECLAIM/d' OplusKernelEnvConfig.mk
-echo "OplusKernelEnvConfig.mk: SCHED_ASSIST / MULTI_FREEAREA / PROCESS_RECLAIM macros removed"
+       -e '/OPLUS_FEATURE_PROCESS_RECLAIM/d' \
+       -e '/OPLUS_FEATURE_VIRTUAL_RESERVE_MEMORY/d' OplusKernelEnvConfig.mk
+echo "OplusKernelEnvConfig.mk: SCHED_ASSIST / MULTI_FREEAREA / PROCESS_RECLAIM / VIRTUAL_RESERVE_MEMORY macros removed"
 
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
-for i in 1 2 3 4 5; do
-  curl -LSs --retry 5 --retry-delay 5 --retry-all-errors \
-    "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main && break
+SU_BASES=("https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
+  "https://gh-proxy.com/https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
+  "https://ghproxy.net/https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh")
+for i in 1 2 3 4 5 6; do
+  b="${SU_BASES[$(( (i-1) % ${#SU_BASES[@]} ))]}"
+  echo "  setup.sh 尝试 $i: $b"
+  if curl -LSs --retry 3 --retry-delay 5 --retry-all-errors "$b" | bash -s main; then break; fi
   echo "!! setup.sh 拉取失败 (第 $i 次)，重试..."
   sleep 10
 done
@@ -102,8 +116,15 @@ echo "==> [3c2] 从社区 bitra 内核回填 Oplus 闭源组件 (system/device_i
 # realme 官方源码 drivers/soc/oplus/{system,device_info,sensor,thermal} 和 include/soc/oplus
 # 全部指向未开源 vendor 目录 (失效符号链接)。ProjectElixir bitra 内核 (同设备, 已验证可编译)
 # 补全了这些组件 —— 直接回填, 让 oplus_project.h 等头文件及其实现恢复存在
-for i in 1 2 3 4 5; do
-  git clone --depth=1 -b bigshot-AOSP https://github.com/ProjectElixir-Devices/kernel_realme_sm8250-bitra ../bitra-ref && break
+BITRA_URL="https://github.com/ProjectElixir-Devices/kernel_realme_sm8250-bitra"
+for i in 1 2 3 4 5 6; do
+  case $(( (i-1) % 3 )) in
+    0) u="$BITRA_URL" ;;
+    1) u="https://gh-proxy.com/$BITRA_URL" ;;
+    2) u="https://gitclone.com/github.com/ProjectElixir-Devices/kernel_realme_sm8250-bitra" ;;
+  esac
+  echo "  bitra-ref 尝试 $i: $u"
+  if git clone --depth=1 -b bigshot-AOSP "$u" ../bitra-ref; then break; fi
   echo "!! bitra-ref clone 失败 (第 $i 次)，重试..."
   rm -rf ../bitra-ref
   sleep 10
@@ -181,8 +202,15 @@ BOOT="$PWD/out/arch/arm64/boot"
 find "$BOOT/dts" -name '*.dtb' -type f | sort | xargs cat > "$BOOT/dtb.concat"
 cat "$BOOT/Image.gz" "$BOOT/dtb.concat" > "$BOOT/Image.gz-dtb"
 
-for i in 1 2 3 4 5; do
-  git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ../ak3 && break
+AK3_URL="https://github.com/osm0sis/AnyKernel3"
+for i in 1 2 3 4 5 6; do
+  case $(( (i-1) % 3 )) in
+    0) u="$AK3_URL" ;;
+    1) u="https://gh-proxy.com/$AK3_URL" ;;
+    2) u="https://gitclone.com/github.com/osm0sis/AnyKernel3" ;;
+  esac
+  echo "  AnyKernel3 尝试 $i: $u"
+  if git clone --depth=1 "$u" ../ak3; then break; fi
   echo "!! AnyKernel3 clone 失败 (第 $i 次)，重试..."
   rm -rf ../ak3
   sleep 10
