@@ -1,50 +1,78 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Oplus 发布源码缺失 Kconfig/Makefile 占位修复。
+"""Oplus 发布源码的缺失组件占位修复。
 
-realme 官方发布的内核源码不完整:
-  - init/Kconfig 引用 kernel/sched_assist/Kconfig、kernel/tuning/Kconfig,
-    但发布源码里这些目录是空的;
-  - kernel/Makefile 里 obj-y 无条件引用 sched_assist/ 等目录, 缺 Makefile 会导致
-    kbuild 下降时报错。
-本脚本扫描所有 Kconfig 的 source 引用, 为不存在的目标创建空占位文件;
-为 kernel/ 下被 obj-y 引用但缺少 Makefile 的目录创建空 Makefile。
-幂等, 逐条容错, 不会中断构建。
+realme 官方发布的内核源码有两个问题:
+1. 大量符号链接指向未发布的 vendor/oplus/kernel/* 目录 (如 kernel/sched_assist
+   -> ../../../vendor/oplus/kernel/oplus_performance/sched_assist/), clone 后全部失效;
+2. 部分 Kconfig 的 source 引用目标文件不存在。
+
+处理策略 (与社区 bitra 内核做法一致 —— 直接禁用这些闭源功能):
+  - 目标以 "/" 结尾的失效符号链接 -> 替换为真实空目录 (内含空 Kconfig 与 Makefile);
+  - 仍缺失的 Kconfig source 目标 -> 创建空占位文件;
+  - kernel/ 下被 obj-* 引用但缺 Makefile 的目录 -> 补空 Makefile。
+幂等, 逐条容错。
 """
+import os
 import pathlib
 import re
 
-KERNEL = pathlib.Path(".")
-created = []
+fixed_links = []
 
-# 1) Kconfig source 占位 (仅处理真实相对路径, 跳过含 make 变量的字面量)
-for kc in KERNEL.rglob("Kconfig*"):
-    if not kc.is_file():
-        continue
-    try:
-        text = kc.read_text(errors="ignore")
-    except OSError:
-        continue
-    for m in re.finditer(r'^\s*source\s+"([^"]+)"', text, re.M):
-        src = m.group(1)
-        if "$" in src or "/" not in src:
-            continue
-        target = pathlib.Path(src)
-        if target.is_file():
-            continue
+# 1) 失效的目录型符号链接 -> 真实空目录
+for dirpath, dirnames, filenames in os.walk(".", followlinks=False):
+    for name in list(dirnames) + list(filenames):
+        p = pathlib.Path(dirpath) / name
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("")
-            created.append(str(target))
+            if p.is_symlink() and not p.exists():
+                target = os.readlink(p)
+                if target.endswith("/"):
+                    p.unlink()
+                    p.mkdir(parents=True, exist_ok=True)
+                    (p / "Kconfig").touch()
+                    (p / "Makefile").touch()
+                    fixed_links.append(f"{p} -> {target}")
         except OSError as e:
-            print(f"  warn: skip {src}: {e}")
+            print(f"  warn: {p}: {e}")
 
-for c in created:
+for f in fixed_links:
+    print(f"  fixed broken symlink: {f}")
+if not fixed_links:
+    print("  no broken directory symlinks")
+
+# 2) Kconfig source 占位
+created = []
+for dirpath, dirnames, filenames in os.walk(".", followlinks=False):
+    if ".git" in dirpath:
+        continue
+    for fn in filenames:
+        if not fn.startswith("Kconfig"):
+            continue
+        kc = pathlib.Path(dirpath) / fn
+        try:
+            text = kc.read_text(errors="ignore")
+        except OSError:
+            continue
+        for m in re.finditer(r'^\s*source\s+"([^"]+)"', text, re.M):
+            src = m.group(1)
+            if "$" in src or "/" not in src:
+                continue
+            target = pathlib.Path(src)
+            if target.is_file() or target.is_symlink():
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("")
+                created.append(str(target))
+            except OSError as e:
+                print(f"  warn: skip {src}: {e}")
+
+for c in sorted(set(created)):
     print(f"  stub: {c}")
 if not created:
     print("  no missing Kconfig files")
 
-# 2) kernel/ 下被 obj-y 引用但缺 Makefile 的目录
+# 3) kernel/ 下被 obj-* 引用但缺 Makefile 的目录
 kmake = pathlib.Path("kernel/Makefile")
 if kmake.exists():
     for m in re.finditer(r"^obj-\$\(CONFIG_\w+\)\s*\+=\s*(\S+)/\s*$", kmake.read_text(), re.M):
