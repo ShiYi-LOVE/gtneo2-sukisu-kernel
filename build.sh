@@ -70,12 +70,17 @@ grep -n "^CC" Makefile | head -3
 # OplusKernelEnvConfig.mk 白名单宏会激活引用闭源头文件的核心代码:
 #   - SCHED_ASSIST -> mutex.h 闭源调度
 #   - VIRTUAL_RESERVE_MEMORY -> linux/reserve_area.h + fs/proc/va_feature_node.h (均未开源)
+#   - TASK_CPUSTATS -> account_task_time/fs/proc/task_cpustats (闭源; defconfig 里
+#     #ifdef 包 CONFIG 行无效, CONFIG_OPLUS_CTP/SCHED 实际从未开启)
+#   - HEALTHINFO -> ion_total()/linux/healthinfo/* (闭源)
 #     且官方 defconfig 本就未开启 CONFIG_VIRTUAL_RESERVE_MEMORY, 出厂编译时该特性守卫即为 false
 # 从白名单删除宏 = 整个功能编译跳过, 与官方出厂行为一致
 sed -i -e '/OPLUS_FEATURE_SCHED_ASSIST/d' -e '/OPLUS_FEATURE_MULTI_FREEAREA/d' \
        -e '/OPLUS_FEATURE_PROCESS_RECLAIM/d' \
-       -e '/OPLUS_FEATURE_VIRTUAL_RESERVE_MEMORY/d' OplusKernelEnvConfig.mk
-echo "OplusKernelEnvConfig.mk: SCHED_ASSIST / MULTI_FREEAREA / PROCESS_RECLAIM / VIRTUAL_RESERVE_MEMORY macros removed"
+       -e '/OPLUS_FEATURE_VIRTUAL_RESERVE_MEMORY/d' \
+       -e '/OPLUS_FEATURE_TASK_CPUSTATS/d' \
+       -e '/OPLUS_FEATURE_HEALTHINFO/d' OplusKernelEnvConfig.mk
+echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO macros removed"
 
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
 SU_BASES=("https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
