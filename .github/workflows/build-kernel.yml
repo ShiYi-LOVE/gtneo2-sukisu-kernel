@@ -20,7 +20,7 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache curl flex git \
-            libssl-dev make zip jq patch python3
+            libssl-dev make zip jq patch python3 zstd
 
       - name: Build kernel (${{ matrix.defconfig }})
         run: |
