@@ -63,8 +63,9 @@ grep -n "^CC" Makefile | head -3
 # OplusKernelEnvConfig.mk 白名单宏 OPLUS_FEATURE_SCHED_ASSIST 会激活 mutex.h 等核心头文件
 # 对闭源 vendor 头文件的 include (头文件从未开源) —— 从白名单删除, 整个功能编译跳过
 # (与社区 bitra 内核做法一致: sched_assist 闭源调度整体禁用)
-sed -i -e '/OPLUS_FEATURE_SCHED_ASSIST/d' -e '/OPLUS_FEATURE_MULTI_FREEAREA/d' OplusKernelEnvConfig.mk
-echo "OplusKernelEnvConfig.mk: SCHED_ASSIST / MULTI_FREEAREA macros removed"
+sed -i -e '/OPLUS_FEATURE_SCHED_ASSIST/d' -e '/OPLUS_FEATURE_MULTI_FREEAREA/d' \
+       -e '/OPLUS_FEATURE_PROCESS_RECLAIM/d' OplusKernelEnvConfig.mk
+echo "OplusKernelEnvConfig.mk: SCHED_ASSIST / MULTI_FREEAREA / PROCESS_RECLAIM macros removed"
 
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
 for i in 1 2 3 4 5; do
@@ -120,6 +121,21 @@ if [ -d ../bitra-ref ]; then
       echo "  restored: drivers/soc/oplus/$d"
     fi
   done
+  # 回填 include/linux 下的 Oplus 闭源头文件/目录 (官方源码中全是失效符号链接)
+  for h in process_mm_reclaim.h vm_anti_fragment.h task_sched_info.h cpu_jank_info.h \
+           reserve_area.h lowmem_dbg.h oplus_wakelock_profiler.h device_info.h; do
+    if [ -f "../bitra-ref/include/linux/$h" ]; then
+      cp -f "../bitra-ref/include/linux/$h" "include/linux/$h"
+      echo "  restored: include/linux/$h"
+    fi
+  done
+  for d in healthinfo iomonitor im special_opt tpd; do
+    if [ -d "../bitra-ref/include/linux/$d" ]; then
+      rm -rf "include/linux/$d"
+      cp -r "../bitra-ref/include/linux/$d" "include/linux/$d"
+      echo "  restored: include/linux/$d/"
+    fi
+  done
   [ -f include/soc/oplus/system/oplus_project.h ] || echo "!! 警告: oplus_project.h 回填失败, 后续编译可能报缺失"
 else
   echo "!! bitra-ref 不可用，缺失组件按空 stub 处理"
@@ -127,6 +143,9 @@ fi
 
 echo "==> [3d] 自动扫描缺失头文件的 include, 删除对应 OPLUS 白名单宏..."
 python3 "$ORIGINAL/fix_oplus_macros.py" || echo "!! 宏清理脚本异常，继续构建"
+
+echo "==> [3d2] 文件级修补 (vmscan/printk 闭源符号缺失 -> 还原 stock 行为)..."
+python3 "$ORIGINAL/fix_file_patches.py" || echo "!! 文件修补脚本异常，继续构建"
 
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
 mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
