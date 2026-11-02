@@ -48,6 +48,11 @@ echo "==> [1/7] 拉取真我官方 Android T 内核源码 (kernel 4.19.157)..."
 git clone --depth=1 "$KERNEL_URL" kernel
 cd kernel
 
+# Oplus Makefile 用 Python2 语法写的 gcc-wrapper.py 包裹编译器，新系统无 python2 会直接报错
+# 摘掉包装，保留其内部 REAL_CC 逻辑
+sed -i 's|$(PYTHON) $(srctree)/scripts/gcc-wrapper.py ||' Makefile
+grep -n "^CC" Makefile | head -3
+
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
@@ -61,9 +66,14 @@ cp -f ../susfs/kernel_patches/include/linux/susfs.h include/linux/ 2>/dev/null |
 cp -f ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/ 2>/dev/null || true
 ls fs/susfs.c include/linux/susfs.h
 
-echo "==> [4/7] 拉取 proton-clang 工具链..."
-git clone --depth=1 https://github.com/kdrag0n/proton-clang ../proton-clang
-export PATH="$PWD/../proton-clang/bin:$PATH"
+echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
+mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
+curl -LOs "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+chmod +x antman
+./antman -S=latest
+cd - > /dev/null
+export PATH="$PWD/neutron-clang/bin:$PATH"
+clang --version | head -1
 
 echo "==> [5/7] 配置内核: $DEFCONFIG..."
 configure_kernel
