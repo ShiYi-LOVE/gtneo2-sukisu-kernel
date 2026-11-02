@@ -97,6 +97,17 @@ for pat in ("fs/proc/*.c", "kernel/sched/*.c", "mm/*.c"):
 if count:
     patched.append(f"global: commented dead-header includes in {count} file(s)")
 
+# 7) kernel/sched/fair.c: 唯一无守卫的 trace_sched_cpu_sel 调用 (fair.c 其余 sched-assist
+#    引用全在 OPLUS_FEATURE_SCHED_ASSIST 块内, 宏删除后自动失效)。该 tracepoint 定义于
+#    闭源头文件, 删除此调用 —— 仅影响 ftrace 调试输出, 无功能影响
+p = pathlib.Path("kernel/sched/fair.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    new, n = re.subn(r"[ \t]*trace_sched_cpu_sel\(.*?\);\n", "", t, flags=re.DOTALL)
+    if n:
+        p.write_text(new)
+        patched.append(f"kernel/sched/fair.c: removed {n} unguarded trace_sched_cpu_sel call(s)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
