@@ -58,6 +58,14 @@ configure_kernel() {
   # 的失效符号链接 (bitra 也未补全该组件) —— 禁用后 ion_system_heap.c 走各处
   # #ifndef 路径 (stock CAF 行为), 功能为标准 ION 分配
   ./scripts/config --file out/.config -d OPLUS_ION_BOOSTPOOL || true
+  # OPLUS_SECURE_GUARD (oplus 安全 syscall/exec/mount 钩子): 其实现
+  # oplus_invoke_syscall/oplus_exec_block/oplus_mount_block 闭源未发布,
+  # 关闭后走各调用点 #else 的 stock CAF 路径
+  ./scripts/config --file out/.config -d OPLUS_SECURE_GUARD || true
+  # MODVERSIONS: gsi_write_channel_scratch 等闭源类型符号的 genksyms CRC 生成失败,
+  # 模块引用 __crc_ 符号时 R_AARCH64_ABS32 重定位报错; 自编译内核+自带模块无 ABI
+  # 兼容需求, 直接关闭
+  ./scripts/config --file out/.config -d MODVERSIONS || true
   make O=out ARCH=arm64 olddefconfig
 }
 
