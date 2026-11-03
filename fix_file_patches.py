@@ -418,6 +418,139 @@ if p.exists():
         p.write_text(t)
         patched.append("drivers/usb/pd/policy_engine.c: typec_is_otg_mode removed (regex fallback)")
 
+# 20) mm/vmscan.c: kswapd_threads (官方定义被注释, 闭源环境提供) -> 用同文件开源的
+#     kswapd_threads_current (同一默认值 DEF_KSWAPD_THREADS_PER_NODE)
+p = pathlib.Path("mm/vmscan.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "\tnr_threads = kswapd_threads;\n"
+    if old in t:
+        t = t.replace(old, "\tnr_threads = kswapd_threads_current;\n", 1)
+        p.write_text(t)
+        patched.append("mm/vmscan.c: kswapd_threads -> kswapd_threads_current")
+
+# 21) drivers/soc/qcom/oplus_watchdog_util.c: cpu_idle_pc_state (extern 数组, 提供者
+#     在闭源 cpuidle 驱动) -> 本地定义全零数组 (永远不视为 PC 空闲, 仅影响
+#     watchdog 调试 ping mask 的收缩范围)
+p = pathlib.Path("drivers/soc/qcom/oplus_watchdog_util.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "extern int cpu_idle_pc_state[NR_CPUS];"
+    if old in t:
+        t = t.replace(old,
+            "int cpu_idle_pc_state[NR_CPUS]; /* local zeroed: closed-source cpuidle provider */", 1)
+        p.write_text(t)
+        patched.append("drivers/soc/qcom/oplus_watchdog_util.c: cpu_idle_pc_state defined locally (zeroed)")
+
+# 22) drivers/soc/qcom/subsys-pil-tz.c log_failure_reason: oplus_kevent_fb_str /
+#     mdmreason_set (崩溃遥测, 提供者闭源) -> 中性化 (仅影响遥测上报)
+p = pathlib.Path("drivers/soc/qcom/subsys-pil-tz.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    n = 0
+    if "\t\toplus_kevent_fb_str(FB_SENSOR, FB_SENSOR_ID_CRASH, reason);\n" in t:
+        t = t.replace("\t\toplus_kevent_fb_str(FB_SENSOR, FB_SENSOR_ID_CRASH, reason);\n",
+                      "\t\t/* oplus_kevent_fb_str skipped: closed */\n", 1); n += 1
+    if "mdmreason_set(reason);" in t:
+        t = t.replace("        mdmreason_set(reason);",
+                      "        /* mdmreason_set skipped: closed */", 1); n += 1
+    if n:
+        p.write_text(t)
+        patched.append(f"drivers/soc/qcom/subsys-pil-tz.c: {n} closed telemetry calls neutered")
+
+# 23) drivers/soc/qcom/subsystem_restart.c: op_restart_modem 定义在 OPLUS_BUG_STABILITY
+#     守卫内 (未启用), force_rst_write 调用点无守卫 -> 中性化 (调试 sysfs 功能)
+p = pathlib.Path("drivers/soc/qcom/subsystem_restart.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "\t\top_restart_modem(subsys);\n"
+    if old in t:
+        t = t.replace(old, "\t\t/* op_restart_modem skipped: definition guarded by inactive OPLUS_BUG_STABILITY */\n", 1)
+        p.write_text(t)
+        patched.append("drivers/soc/qcom/subsystem_restart.c: op_restart_modem call neutered")
+
+# 24) drivers/soc/oplus/sensor/oplus_ssc_interact/oplus_ssc_interact.c (bitra 回填):
+#     register/unregister_lcdinfo_notifier 提供者未回填 (bitra 构建走 panel_event 分支,
+#     本构建走 #else 分支) -> 中性化 (低亮模式传感器联动降级)
+p = pathlib.Path("drivers/soc/oplus/sensor/oplus_ssc_interact/oplus_ssc_interact.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    n = 0
+    if "\t\t\tregister_lcdinfo_notifier(&ssc_cxt->nb);\n" in t:
+        t = t.replace("\t\t\tregister_lcdinfo_notifier(&ssc_cxt->nb);\n",
+                      "\t\t\t/* register_lcdinfo_notifier skipped: provider closed */\n", 1); n += 1
+    if "\tunregister_lcdinfo_notifier(&ssc_cxt->nb);\n" in t:
+        t = t.replace("\tunregister_lcdinfo_notifier(&ssc_cxt->nb);\n",
+                      "\t/* unregister_lcdinfo_notifier skipped: provider closed */\n", 1); n += 1
+    if n:
+        p.write_text(t)
+        patched.append(f"drivers/soc/oplus/.../oplus_ssc_interact.c: {n} lcdinfo notifier calls neutered")
+
+# 25) drivers/soc/oplus/sensor/oplus_sensor_feedback/sensor_feedback.c (bitra 回填):
+#     CONFIG_DRM_MSM 分支调用 msm_drm_register_client (techpack/display 闭源) ->
+#     禁用该分支, 走 #elif CONFIG_FB 的标准 fb_register_client
+p = pathlib.Path("drivers/soc/oplus/sensor/oplus_sensor_feedback/sensor_feedback.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "#if defined(CONFIG_DRM_MSM)\n\tsensor_fb_cxt->fb_notif.notifier_call = sensor_fb_notifier;\n\terr = msm_drm_register_client(&sensor_fb_cxt->fb_notif);"
+    if old in t:
+        t = t.replace(old,
+            "#if 0 /* msm_drm_register_client: techpack/display closed; use FB notifier */ && defined(CONFIG_DRM_MSM)\n\tsensor_fb_cxt->fb_notif.notifier_call = sensor_fb_notifier;\n\terr = msm_drm_register_client(&sensor_fb_cxt->fb_notif);", 1)
+        p.write_text(t)
+        patched.append("drivers/soc/oplus/.../sensor_feedback.c: DRM_MSM branch disabled, FB notifier used")
+
+# 26) drivers/block/zram/hybridswap/hybridswap_swapd.c: msm_drm_(un)register_client
+#     (techpack/display 闭源) -> 中性化全部调用, 保留 goto/label 结构
+p = pathlib.Path("drivers/block/zram/hybridswap/hybridswap_swapd.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    n = 0
+    old = "\tret = msm_drm_register_client(&fb_notif);\n"
+    if old in t:
+        t = t.replace(old, "\tret = 0; /* msm_drm_register_client removed: techpack/display closed */\n"); n += 1
+    old2 = "\tmsm_drm_unregister_client(&fb_notif);\n"
+    if old2 in t:
+        t = t.replace(old2, "\t/* msm_drm_unregister_client removed: techpack/display closed */\n"); n += 1
+    if n:
+        p.write_text(t)
+        patched.append(f"drivers/block/zram/hybridswap/hybridswap_swapd.c: {n} msm_drm calls neutered")
+
+# 27) drivers/net/wireless/cnss2/main.c: kevent_send_to_user (oplus_kevent 闭源) ->
+#     中性化 (仅影响 WLAN 自恢复遥测上报)
+p = pathlib.Path("drivers/net/wireless/cnss2/main.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "\tkevent_send_to_user(cnss_event);\n"
+    if old in t:
+        t = t.replace(old, "\t/* kevent_send_to_user skipped: oplus_kevent closed */\n", 1)
+        p.write_text(t)
+        patched.append("drivers/net/wireless/cnss2/main.c: kevent_send_to_user neutered")
+
+# 28) drivers/usb/pd/policy_engine.c: oplus_wpc_set_wrx_en_value (无线充电闭源, GT Neo2
+#     无 wpc 硬件) -> 中性化全部调用 (全文件共 4 处: 1 处 (1), 3 处 (0))
+p = pathlib.Path("drivers/usb/pd/policy_engine.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    new, n = re.subn(r"(\t+)oplus_wpc_set_wrx_en_value\(\d\);",
+                     r"\1/* oplus_wpc_set_wrx_en_value skipped: closed, no wpc hw */", t)
+    if n:
+        p.write_text(new)
+        patched.append(f"drivers/usb/pd/policy_engine.c: {n} oplus_wpc_set_wrx_en_value calls neutered")
+
+# 29) drivers/power/supply/qcom/Makefile: OPLUS_FEATURE_CHG_BASIC 分支排除了
+#     qpnp-smb5.o smb5-lib.o (被闭源 oplus 充电驱动替代), 但 schgm-flash.o 仍在构建且
+#     依赖 smblib_* (定义于 smb5-lib.c, 开源存在) -> 回补两个目标, qcom stock 充电栈
+#     恢复链接 (probe 由 DT 决定, 无节点则不运行)
+p = pathlib.Path("drivers/power/supply/qcom/Makefile")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "obj-$(CONFIG_QPNP_SMB5)\t\t+= step-chg-jeita.o battery.o pmic-voter.o storm-watch.o schgm-flash.o\n"
+    if old in t:
+        t = t.replace(old,
+            "obj-$(CONFIG_QPNP_SMB5)\t\t+= step-chg-jeita.o battery.o pmic-voter.o storm-watch.o schgm-flash.o qpnp-smb5.o smb5-lib.o\n", 1)
+        p.write_text(t)
+        patched.append("drivers/power/supply/qcom/Makefile: + qpnp-smb5.o smb5-lib.o restored")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
