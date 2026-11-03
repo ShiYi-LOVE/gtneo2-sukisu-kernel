@@ -46,6 +46,7 @@ jobs:
           name: AK3-gtneo2-${{ matrix.tag }}-SukiSU-susfs
           path: |
             out/AK3-*.zip
-            out/Image.gz-dtb
+            out/Image
             out/kernel.config
+            out/vermagic-info.txt
           if-no-files-found: error
