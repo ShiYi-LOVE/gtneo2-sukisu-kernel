@@ -49,6 +49,10 @@ configure_kernel() {
     ./scripts/config --file out/.config -e "$opt" || true
   done
   ./scripts/config --file out/.config -d KSU_SUSFS_SUS_SU || true
+  # STMVL53L1 (ST ToF 激光对焦传感器) 在 Kconfig 里 default y, 但其 CCI 接口
+  # 依赖未开源的 camera techpack 头文件 (cam_cci_ctrl_interface.h);
+  # GT Neo 2 无此硬件, 显式禁用 (defconfig 显式 not-set 可覆盖 default y)
+  ./scripts/config --file out/.config -d STMVL53L1 || true
   make O=out ARCH=arm64 olddefconfig
 }
 
