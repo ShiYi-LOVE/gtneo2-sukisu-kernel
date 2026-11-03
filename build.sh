@@ -53,6 +53,11 @@ configure_kernel() {
   # 依赖未开源的 camera techpack 头文件 (cam_cci_ctrl_interface.h);
   # GT Neo 2 无此硬件, 显式禁用 (defconfig 显式 not-set 可覆盖 default y)
   ./scripts/config --file out/.config -d STMVL53L1 || true
+  # OPLUS_ION_BOOSTPOOL (ION 内存加速池): Kconfig default n, 但 vendor defconfig
+  # 第1148行显式 =y。其头/源文件 (oplus_ion_boost_pool.h/.c) 是指向未开源 vendor
+  # 的失效符号链接 (bitra 也未补全该组件) —— 禁用后 ion_system_heap.c 走各处
+  # #ifndef 路径 (stock CAF 行为), 功能为标准 ION 分配
+  ./scripts/config --file out/.config -d OPLUS_ION_BOOSTPOOL || true
   make O=out ARCH=arm64 olddefconfig
 }
 
