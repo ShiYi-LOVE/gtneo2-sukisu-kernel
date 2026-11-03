@@ -22,11 +22,19 @@ mkdir -p "$ORIGINAL/out"
 KSU_CONFIG_OPTS=(
   KSU
   KSU_SUSFS
+  KSU_SUSFS_HAS_MAGIC_MOUNT
   KSU_SUSFS_SUS_PATH
   KSU_SUSFS_SUS_MOUNT
   KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
   KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+  KSU_SUSFS_SUS_KSTAT
+  KSU_SUSFS_TRY_UMOUNT
+  KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+  KSU_SUSFS_SPOOF_UNAME
   KSU_SUSFS_ENABLE_LOG
+  KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+  KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+  KSU_SUSFS_OPEN_REDIRECT
   KPROBES
   KPROBE_EVENTS
   KRETPROBES
@@ -117,6 +125,9 @@ python3 "$ORIGINAL/kconfig_stubs.py" || echo "!! 占位脚本异常，继续构�
 echo "==> [3c] 应用 susfs realme 适配补丁 (官方 hunk 不兼容 Oplus 源码的 5 处)..."
 python3 "$ORIGINAL/fix_susfs.py" || echo "!! susfs 适配脚本异常，继续构建"
 
+echo "==> [3c1] 注入 KSU_SUSFS Kconfig 定义 (SukiSU main 不自带, 缺失则 susfs 全部静默失效)..."
+python3 "$ORIGINAL/susfs_kconfig.py" || { echo "FATAL: KSU_SUSFS Kconfig 注入/自检失败"; exit 1; }
+
 echo "==> [3c2] 从社区 bitra 内核回填 Oplus 闭源组件 (system/device_info/sensor/thermal)..."
 # realme 官方源码 drivers/soc/oplus/{system,device_info,sensor,thermal} 和 include/soc/oplus
 # 全部指向未开源 vendor 目录 (失效符号链接)。ProjectElixir bitra 内核 (同设备, 已验证可编译)
@@ -193,7 +204,10 @@ configure_kernel
 echo "==> [6/7] 编译 Image.gz + dtbs (jobs=$JOBS, GNU as —— 4.19 老内核不兼容 LLVM 集成汇编器)..."
 BUILD_FLAGS=(O=out ARCH=arm64 SUBARCH=arm64
   CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
-  LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-)
+  LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+  # Oplus 源码按 GCC 习惯留有 implicit-int/隐式声明等历史问题 (出厂用 GCC 只告警),
+  # Clang -Werror 会全部升级为错误 —— 全局降级, 真正的链接错误仍会正常失败
+  KCFLAGS="-Wno-error")
 
 if ! make "${BUILD_FLAGS[@]}" -j"$JOBS" Image.gz dtbs; then
   echo "!! 编译失败，清理后重试一次..."
