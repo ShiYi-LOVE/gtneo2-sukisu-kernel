@@ -253,6 +253,51 @@ if p.exists():
             p.write_text(t)
             patched.append("drivers/power/supply/qcom/qpnp-fg-gen4.c: batt-therm probe block removed (regex fallback)")
 
+# 15) drivers/soc/qcom/subsystem_restart.c: 两处官方依赖闭源 oppo_project.h 的符号
+#     a) 313行: 官方把 OPLUS_BUG_STABILITY 守卫注释掉, PREVERSION (闭源枚举) 变成
+#        无条件引用 —— 条件恒改 false, 走官方 #else 语义 (restart_level = i, 即
+#        stock CAF 行为, 用户版设备永远不满足 PREVERSION)
+#     b) 1485行: #ifdef VENDOR_EDIT 的 esoc0 fulldump 块引用 oem_is_fulldump /
+#        direct_panic / delay_panic (声明全在 #ifdef OPLUS_BUG_STABILITY 内,
+#        本构建不启用) —— 改 #if 0 走 #else 分支 (stock CAF: stay awake + schedule)
+p = pathlib.Path("drivers/soc/qcom/subsystem_restart.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old_a = "if(PREVERSION == get_eng_version()){"
+    if old_a in t:
+        t = t.replace(old_a,
+            "if (0) { /* PREVERSION: closed-source eng_version enum; user build -> stock CAF branch */", 1)
+        p.write_text(t)
+        patched.append("drivers/soc/qcom/subsystem_restart.c: PREVERSION condition neutralized (stock CAF)")
+    t = p.read_text(errors="ignore")
+    old_b = '\t#ifdef VENDOR_EDIT\n\t\tif (!strcmp(name, "esoc0") && oem_is_fulldump()) {'
+    if old_b in t:
+        t = t.replace(old_b,
+            '#if 0 /* VENDOR_EDIT esoc0 fulldump: oem_is_fulldump/direct_panic/delay_panic closed-source */\n'
+            '\t\tif (!strcmp(name, "esoc0") && oem_is_fulldump()) {', 1)
+        p.write_text(t)
+        patched.append("drivers/soc/qcom/subsystem_restart.c: esoc0 fulldump VENDOR_EDIT block -> #if 0 (stock CAF #else)")
+
+# 16) 全树: soc/oplus/system/oppo_project.h (oppo 拼写) 在开源树中不存在 (include/soc/oplus/system
+#     是指向闭源 vendor 的失效符号链接); bitra 回填提供的是 oplus_project.h (oplus 拼写),
+#     两者为同一组件, 接口一致 (get_project/is_confidential/get_eng_version 均有实现) —— 统一改名
+count = 0
+skip_dirs = {".git", "out", "neutron-clang"}
+for pat in ("*.c", "*.h"):
+    for f in pathlib.Path(".").rglob(pat):
+        if any(part in skip_dirs for part in f.parts):
+            continue
+        try:
+            t = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        if "soc/oplus/system/oppo_project.h" in t:
+            t = t.replace("soc/oplus/system/oppo_project.h", "soc/oplus/system/oplus_project.h")
+            f.write_text(t)
+            count += 1
+if count:
+    patched.append(f"global: renamed oppo_project.h -> oplus_project.h (bitra backfill) in {count} file(s)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
