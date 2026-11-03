@@ -108,6 +108,39 @@ if p.exists():
         p.write_text(new)
         patched.append(f"kernel/sched/fair.c: removed {n} unguarded trace_sched_cpu_sel call(s)")
 
+# 8) kernel/exit.c: 官方源码把 OPLUS_BUG_STABILITY 守卫注释掉了, is_critial_process
+#    (官方拼写) 调用变成无条件且全树无定义 —— 注释掉该调试块 (仅影响 printk 输出)
+p = pathlib.Path("kernel/exit.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ("//#ifdef OPLUS_BUG_STABILITY\n"
+           "    if (is_critial_process(tsk)) {\n"
+           "        printk(\"critical svc %d:%s exit with %ld !\\n\", tsk->pid, tsk->comm,code);\n"
+           "    }\n"
+           "//#endif /*OPLUS_BUG_STABILITY*/\n")
+    if "is_critial_process" in t and old in t:
+        t = t.replace(old, "/* OPLUS_BUG_STABILITY debug block removed: is_critial_process undefined in released source */\n")
+        p.write_text(t)
+        patched.append("kernel/exit.c: removed unguarded is_critial_process debug block")
+    elif "is_critial_process" in t:
+        # 兜底: 文本与预期不完全一致时, 直接禁用含该调用的行块
+        t = re.sub(r"//[#\s]*ifdef OPLUS_BUG_STABILITY.*?//[#\s]*endif[^\n]*\n",
+                   "/* removed: is_critial_process undefined */\n", t, flags=re.S)
+        if "is_critial_process" not in t:
+            p.write_text(t)
+            patched.append("kernel/exit.c: is_critial_process block removed (fallback)")
+
+# 9) drivers/block/zram/hybridswap/hybridswap_eswap.c: 官方源码 meminfo_show 定义
+#    缺返回类型 (GCC implicit-int 仅告警, Clang -Werror 报错) —— 补上 ssize_t
+p = pathlib.Path("drivers/block/zram/hybridswap/hybridswap_eswap.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "static inline meminfo_show(struct hybstatus *stat, char *buf, ssize_t len)"
+    if old in t:
+        t = t.replace(old, "static inline ssize_t meminfo_show(struct hybstatus *stat, char *buf, ssize_t len)")
+        p.write_text(t)
+        patched.append("drivers/block/zram/hybridswap/hybridswap_eswap.c: meminfo_show return type fixed (ssize_t)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
