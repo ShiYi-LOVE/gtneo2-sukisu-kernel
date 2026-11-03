@@ -105,7 +105,17 @@ sed -i -e '/OPLUS_FEATURE_SCHED_ASSIST/d' -e '/OPLUS_FEATURE_MULTI_FREEAREA/d' \
        -e '/OPLUS_FEATURE_VIRTUAL_RESERVE_MEMORY/d' \
        -e '/OPLUS_FEATURE_TASK_CPUSTATS/d' \
        -e '/OPLUS_FEATURE_HEALTHINFO/d' OplusKernelEnvConfig.mk
-echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO macros removed"
+# SECURE_GUARD/MOUNTGUARD/EXECGUARD 三个 ifeq 块强制 export CONFIG_OPLUS_*_GUARD=y
+# 并加 -D 命令行宏 (优先级高于 .config, scripts/config -d 无法关闭):
+#   CONFIG_OPLUS_SECURE_GUARD  -> oplus_invoke_syscall (闭源)
+#   CONFIG_OPLUS_MOUNT_BLOCK   -> oplus_mount_block    (闭源)
+#   CONFIG_OPLUS_EXECVE_*      -> oplus_exec_block     (闭源)
+# 删除强制注入行后, 调用点 #ifdef 自动落到 stock CAF 路径 (bitra 同做法: 整块删除)
+sed -i -e '/export CONFIG_OPLUS_SECURE_GUARD/d'  -e '/DCONFIG_OPLUS_SECURE_GUARD/d' \
+       -e '/export CONFIG_OPLUS_MOUNT_BLOCK/d'   -e '/DCONFIG_OPLUS_MOUNT_BLOCK/d' \
+       -e '/export CONFIG_OPLUS_EXECVE_BLOCK/d'  -e '/DCONFIG_OPLUS_EXECVE_BLOCK/d' \
+       -e '/DCONFIG_OPLUS_EXECVE_REPORT/d' OplusKernelEnvConfig.mk
+echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO macros removed; SECURE_GUARD/MOUNT_BLOCK/EXECVE force-exports removed"
 
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
 SU_BASES=("https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
