@@ -201,7 +201,7 @@ clang --version | head -1
 echo "==> [4b] 全局移除 -Werror (Oplus 源码按 GCC 旧告警标准编写, Clang 严格告警全变错误;
 #        显式 -Werror=xxx 不受 KCFLAGS -Wno-error 影响, 必须从 Makefile 源头剥离)..."
 grep -rlZ --include='Makefile' --include='Makefile.*' --include='Kbuild*' -e '-Werror' . 2>/dev/null \
-  | xargs -0 -r sed -i 's/-Werror=[a-zA-Z0-9_=.-]*//g; s/-Werror//g'
+  | xargs -0 -r sed -i 's/-Werror[=-][a-zA-Z0-9_=.-]*//g; s/-Werror//g'
 echo "  -Werror stripped from $(grep -rl --include='Makefile*' --include='Kbuild*' -e '-Werror' . 2>/dev/null | wc -l) remaining files"
 
 echo "==> [5/7] 配置内核: $DEFCONFIG..."
