@@ -568,6 +568,44 @@ if p.exists():
         p.write_text(t)
         patched.append(f"drivers/esoc/esoc-mdm-4x.c: {n} mdmreason_set calls neutered")
 
+# 31) include/linux/vermagic.h: 内核以 CONFIG_MODVERSIONS=n 编译 (绕开 genksyms
+#     对 gsi_write_channel_scratch 的 CRC 生成缺陷), 但原厂 vendor 模块的 vermagic
+#     带 "modversions" 标志, 字符串必须逐字一致才能加载 -> 硬写入 VERMAGIC_STRING。
+#     因 MODVERSIONS=n, 加载时不做 CRC 校验, 只比对 vermagic。
+p = pathlib.Path("include/linux/vermagic.h")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ('#ifdef CONFIG_MODVERSIONS\n'
+           '#define MODULE_VERMAGIC_MODVERSIONS "modversions "\n'
+           '#else\n'
+           '#define MODULE_VERMAGIC_MODVERSIONS ""\n'
+           '#endif\n')
+    new = ('/* 强制与 vendor 模块 vermagic 对齐: 恒带 modversions 标志 */\n'
+           '#define MODULE_VERMAGIC_MODVERSIONS "modversions "\n')
+    if old in t:
+        p.write_text(t.replace(old, new, 1))
+        patched.append("include/linux/vermagic.h: modversions flag forced")
+
+# 32) kernel/module.c: module_sig_check() 在模块带签名但无法用本内核密钥链验证时
+#     直接返回错误 (MODULE_SIG_FORCE=n 也拦不住), 原厂 vendor 模块用真我私钥签名,
+#     我们编不出同密钥 -> 一律放行 (保留 CONFIG_MODULE_SIG=y 只为维持 struct module
+#     布局与原厂一致, 布局变化会让模块的 this_module 段错位)。
+p = pathlib.Path("kernel/module.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "OPLUS_ANY_MODULE_SIG_OK" not in t:
+        idx = t.find("static int module_sig_check(struct load_info *info, int flags)")
+        if idx >= 0:
+            anchor = "const void *mod = info->hdr;\n"
+            j = t.find(anchor, idx)
+            if j >= 0:
+                ins = j + len(anchor)
+                patch_txt = ("\t/* OPLUS_ANY_MODULE_SIG_OK: 放行厂商签名模块 (无本内核密钥) */\n"
+                             "\treturn 0;\n")
+                t = t[:ins] + patch_txt + t[ins:]
+                p.write_text(t)
+                patched.append("kernel/module.c: module_sig_check accepts any signature")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
