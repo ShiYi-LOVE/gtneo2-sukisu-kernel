@@ -1,7 +1,9 @@
 ### AnyKernel3 Ramdisk Mod Script
 ## osm0sis @ xda-developers
 ## Realme GT Neo 2 (bitra) — SukiSU-Ultra + SusFS
-## 配置参照 ProjectElixir bitra 内核（社区已验证可开机）
+## 注意: AK3 v2+ 的 shell 变量必须大写 (BLOCK/IS_SLOT_DEVICE/...),
+##   小写 block= 不会被 ak3-core.sh 识别 -> "Unable to determine  partition"
+##   (r32 首刷实测踩坑; auto = 自动探测分区路径与 slot, 抗 recovery 差异)
 
 # begin properties
 properties() { '
@@ -20,11 +22,11 @@ supported.versions=
 supported.patchlevels=
 '; } # end properties
 
-# shell variables
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=0;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
+# shell variables (UPPERCASE, AK3 v2+ convention)
+BLOCK=auto;
+IS_SLOT_DEVICE=auto;
+RAMDISK_COMPRESSION=auto;
+PATCH_VBMETA_FLAG=auto;
 
 ## AnyKernel methods (DO NOT CHANGE)
 . tools/ak3-core.sh;
