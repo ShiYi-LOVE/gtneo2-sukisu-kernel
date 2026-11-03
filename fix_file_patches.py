@@ -298,6 +298,99 @@ for pat in ("*.c", "*.h"):
 if count:
     patched.append(f"global: renamed oppo_project.h -> oplus_project.h (bitra backfill) in {count} file(s)")
 
+# 17) drivers/staging/android/ion/ion_system_heap.c: CONFIG_OPLUS_ION_BOOSTPOOL 已禁用
+#     (闭源失效符号链接组件), 编译走 #ifndef stock 路径, 但路径内仍有 3 处活跃引用
+#     NR_IONCACHE_PAGES —— 该 vmstat 枚举项在 mmzone.h/vmstat.c 由
+#     OPLUS_FEATURE_HEALTHINFO 守卫 (宏已因闭源清理)。不能文件级 define (枚举跨
+#     编译单元错位会破坏 zone 统计), 3 处均为启动预填/预留优化, 中性化还原 stock 行为:
+#     a) shrink 循环的 "预留 200MB" 检查 -> 移除 (stock CAF 无此检查)
+#     b) fill_pool_kworkthread 启动预填 while 条件 -> 改为有界 for 循环 (总页数不变)
+p = pathlib.Path("drivers/staging/android/ion/ion_system_heap.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old_a = ("#ifndef CONFIG_OPLUS_ION_BOOSTPOOL\n"
+             "\t\t/*\n"
+             "\t\t * Keep minimum 200 MB in the pool so that camera launch latency would remain\n"
+             "\t\t * low under heavy memory pressure also.\n"
+             "\t\t */\n"
+             "\t\tif (global_zone_page_state(NR_IONCACHE_PAGES) < MIN_ION_POOL_PAGES)\n"
+             "\t\t\tbreak;\n"
+             "#endif\n")
+    if old_a in t:
+        t = t.replace(old_a,
+            "\t\t/* min-pool reserve check removed: NR_IONCACHE_PAGES is an\n"
+            "\t\t * OPLUS_FEATURE_HEALTHINFO vmstat item (closed in released source);\n"
+            "\t\t * stock CAF shrink path has no such check */\n", 1)
+        p.write_text(t)
+        patched.append("drivers/staging/android/ion/ion_system_heap.c: 200MB min-pool reserve check removed")
+    t = p.read_text(errors="ignore")
+    old_b = ("\tfor (i = 0; i < NUM_ORDERS; i++) {\n"
+             "\t\twhile (global_zone_page_state(NR_IONCACHE_PAGES) <\n"
+             "\t\t\t\tMIN_ION_POOL_PAGES_BOOTUP) {\n"
+             "\t\t\tif (fill_page_pool(sh->heap.priv, sh->cached_pools[i]) < 0)\n"
+             "\t\t\t\tbreak;\n"
+             "\t\t}\n"
+             "\t}")
+    new_b = ("\tfor (i = 0; i < NUM_ORDERS; i++) {\n"
+             "\t\tint j;\n"
+             "\t\tfor (j = 0; j < MIN_ION_POOL_PAGES_BOOTUP / NUM_ORDERS; j++) {\n"
+             "\t\t\tif (fill_page_pool(sh->heap.priv, sh->cached_pools[i]) < 0)\n"
+             "\t\t\t\tbreak;\n"
+             "\t\t}\n"
+             "\t}")
+    old_c = ("\tfor (i = 0; i < NUM_ORDERS; i++) {\n"
+             "\t\twhile (global_zone_page_state(NR_IONCACHE_PAGES) <\n"
+             "\t\t\t\t(2 * MIN_ION_POOL_PAGES_BOOTUP)) {\n"
+             "\t\t\tif (fill_page_pool(sh->heap.priv, sh->uncached_pools[i]) < 0)\n"
+             "\t\t\t\tbreak;\n"
+             "\t\t}\n"
+             "\t}")
+    new_c = ("\tfor (i = 0; i < NUM_ORDERS; i++) {\n"
+             "\t\tint j;\n"
+             "\t\tfor (j = 0; j < (2 * MIN_ION_POOL_PAGES_BOOTUP) / NUM_ORDERS; j++) {\n"
+             "\t\t\tif (fill_page_pool(sh->heap.priv, sh->uncached_pools[i]) < 0)\n"
+             "\t\t\t\tbreak;\n"
+             "\t\t}\n"
+             "\t}")
+    n = 0
+    if old_b in t:
+        t = t.replace(old_b, new_b, 1); n += 1
+    if old_c in t:
+        t = t.replace(old_c, new_c, 1); n += 1
+    if n:
+        p.write_text(t)
+        patched.append(f"drivers/staging/android/ion/ion_system_heap.c: boot-prefetch while -> bounded for ({n} sites)")
+    elif "NR_IONCACHE_PAGES" in t:
+        # 兜底: 全局替换仍存活的 NR_IONCACHE_PAGES 条目为安全上界写法
+        t = re.sub(r"while \(global_zone_page_state\(NR_IONCACHE_PAGES\) <\s*\(?([\dA-Z_ *]+)\)?\) \{",
+                   r"while (fill_count++ < \1 / NUM_ORDERS) {", t)
+        p.write_text(t)
+        patched.append("drivers/staging/android/ion/ion_system_heap.c: NR_IONCACHE_PAGES uses replaced (regex fallback)")
+
+# 18) drivers/soc/qcom/fsa4480-i2c.c: #include "dsi/dsi_display.h" (techpack/display
+#     未开源, 官方源码 techpack 只有 stub) + get_main_display()/dsi_parser_utils 引用。
+#     仅用于读取 DT 属性 "oplus,dp-support-customized" 决定 DP 方向寄存器值;
+#     GT Neo2 USB-C 无 DP alt-mode, 取 false (走 oplus 非 DP 分支, 与设备一致)
+p = pathlib.Path("drivers/soc/qcom/fsa4480-i2c.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    inc = '#include "dsi/dsi_display.h"\n'
+    if inc in t:
+        t = t.replace(inc, "/* dsi_display.h include removed: techpack/display not open-sourced */\n", 1)
+        p.write_text(t)
+        patched.append("drivers/soc/qcom/fsa4480-i2c.c: closed dsi/dsi_display.h include removed")
+    t = p.read_text(errors="ignore")
+    old = ('\tstruct dsi_display *display = get_main_display();\n'
+           '\tstruct dsi_parser_utils *utils = &display->panel->utils;\n'
+           '\tbool oplus_dp_support = utils->read_bool(utils->data, "oplus,dp-support-customized");\n')
+    if old in t:
+        t = t.replace(old,
+            '\t/* dsi_display (techpack/display) not open-sourced; GT Neo2 USB-C has no\n'
+            '\t * DP alt-mode -> oplus_dp_support false, matches device DT */\n'
+            '\tbool oplus_dp_support = false;\n', 1)
+        p.write_text(t)
+        patched.append("drivers/soc/qcom/fsa4480-i2c.c: get_main_display block -> oplus_dp_support = false")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
