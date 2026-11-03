@@ -174,6 +174,32 @@ if p.exists():
             p.write_text(t)
             patched.append("net/oplus_nwpower/oplus_nwpower.c: platform check removed (regex fallback)")
 
+# 12) drivers/nfc/nq-nci.c: nfcc_hw_check 的 #ifndef OPLUS_BUG_STABILITY 分支
+#     (官方出厂定义该宏, 从不编译此分支) 引用了未声明的局部变量 nci_reset_ntf
+#     (声明+kzalloc 只存在于 #ifdef 分支) —— 纯源码 bug, 注释掉该 NTF 读取块
+#     (该块在任何已知构建里都从未编译过, 移除不影响 NFC 功能)
+p = pathlib.Path("drivers/nfc/nq-nci.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ("\t/* Read Notification of RESET command */\n"
+           "\tret = i2c_master_recv(client, nci_reset_ntf, NCI_RESET_NTF_LEN);\n"
+           "\tif (ret < 0) {\n"
+           "\t\tdev_dbg(&client->dev,\n"
+           "\t\t\t\"%s: - Error in getting NFCC HW info\\n\", __func__);\n"
+           "\t\tgoto err_nfcc_hw_check;\n"
+           "\t}\n")
+    if old in t:
+        t = t.replace(old, "/* nq-nci: RESET NTF read removed - undeclared nci_reset_ntf in #ifndef OPLUS_BUG_STABILITY branch (never compiled officially) */\n")
+        p.write_text(t)
+        patched.append("drivers/nfc/nq-nci.c: undeclared nci_reset_ntf read block removed")
+    elif "nci_reset_ntf" in t:
+        # 兜底: 注释整个含未声明变量的 i2c_master_recv 语句行
+        t = re.sub(r"[ \t]*ret = i2c_master_recv\(client, nci_reset_ntf, NCI_RESET_NTF_LEN\);[^\n]*\n",
+                   "/* nq-nci: undeclared nci_reset_ntf call removed */\n", t)
+        if "nci_reset_ntf" not in t.replace("/* nq-nci: undeclared nci_reset_ntf call removed */", ""):
+            p.write_text(t)
+            patched.append("drivers/nfc/nq-nci.c: nci_reset_ntf usage removed (regex fallback)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
