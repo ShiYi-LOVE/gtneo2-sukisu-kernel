@@ -200,6 +200,23 @@ if p.exists():
             p.write_text(t)
             patched.append("drivers/nfc/nq-nci.c: nci_reset_ntf usage removed (regex fallback)")
 
+# 13) drivers/power/reset/msm-poweroff.c: 无守卫引用 PON_RESTART_REASON_NORMAL,
+#     但该枚举(及 SILENCE/SAU/RF... 全组)包在 #ifdef OPLUS_BUG_STABILITY 内
+#     (include/linux/input/qpnp-power-on.h) —— 官方出厂全局定义该宏。
+#     枚举值全部开源, 本文件内 #define 启用完整分支即可; 不做全局定义避免
+#     其他文件激活未知闭源代码
+p = pathlib.Path("drivers/power/reset/msm-poweroff.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    anchor = " */\n\n#include <linux/delay.h>"
+    if "OPLUS_BUG_STABILITY" not in t.split("#include")[0] and anchor in t:
+        t = t.replace(anchor,
+            " */\n\n/* file-local enable: PON_RESTART_REASON_* enums (qpnp-power-on.h)\n"
+            "   are guarded by this macro; official builds define it globally */\n"
+            "#define OPLUS_BUG_STABILITY\n\n#include <linux/delay.h>", 1)
+        p.write_text(t)
+        patched.append("drivers/power/reset/msm-poweroff.c: file-local OPLUS_BUG_STABILITY enabled")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
