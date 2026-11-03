@@ -70,7 +70,8 @@ configure_kernel() {
 }
 
 echo "==> [1/7] 拉取真我官方 Android T 内核源码 (kernel 4.19.157)..."
-rm -rf kernel ../susfs ../ak3 out
+# 预清理 (绝对路径; 保留仓库自带 ak3/ 模板目录!)
+rm -rf kernel out "$ORIGINAL/susfs" "$ORIGINAL/ak3-clone" "$ORIGINAL/bitra-ref"
 # 多源回退: 直连 -> 镜像加速 (VM/弱网环境 github 直连常被 reset)
 KERNEL_URLS=("$KERNEL_URL"
   "https://gh-proxy.com/$KERNEL_URL"
@@ -255,6 +256,11 @@ find "$BOOT/dts" -name '*.dtb' -type f | sort | xargs cat > "$BOOT/dtb.concat"
 cat "$BOOT/Image.gz" "$BOOT/dtb.concat" > "$BOOT/Image.gz-dtb"
 
 AK3_URL="https://github.com/osm0sis/AnyKernel3"
+# 注意: 此时 cwd 仍为 kernel/ (编译目录), ../ 解析有歧义 —— 一律绝对路径。
+# 克隆到独立目录 ak3-clone, 绝不覆盖仓库自带模板 ak3/anykernel.sh
+# (r31 教训: ../ak3 解析到 $ORIGINAL/ak3, 重试时 rm -rf 把模板删了导致 cp same file)
+AK3_DIR="$ORIGINAL/ak3-clone"
+rm -rf "$AK3_DIR"
 for i in 1 2 3 4 5 6; do
   case $(( (i-1) % 3 )) in
     0) u="$AK3_URL" ;;
@@ -262,15 +268,16 @@ for i in 1 2 3 4 5 6; do
     2) u="https://gitclone.com/github.com/osm0sis/AnyKernel3" ;;
   esac
   echo "  AnyKernel3 尝试 $i: $u"
-  if git clone --depth=1 "$u" ../ak3; then break; fi
+  if git clone --depth=1 "$u" "$AK3_DIR"; then break; fi
   echo "!! AnyKernel3 clone 失败 (第 $i 次)，重试..."
-  rm -rf ../ak3
+  rm -rf "$AK3_DIR"
   sleep 10
 done
-rm -rf ../ak3/.git
-cp "$ORIGINAL/ak3/anykernel.sh" ../ak3/anykernel.sh
-cp "$BOOT/Image.gz-dtb" ../ak3/
-( cd ../ak3 && zip -r9 "$ORIGINAL/out/AK3-gtneo2-${TAG}-SukiSU-susfs.zip" . )
+rm -rf "$AK3_DIR/.git"
+cp "$ORIGINAL/ak3/anykernel.sh" "$AK3_DIR/anykernel.sh"
+cp "$BOOT/Image.gz-dtb" "$AK3_DIR/"
+mkdir -p "$ORIGINAL/out"
+( cd "$AK3_DIR" && zip -r9 "$ORIGINAL/out/AK3-gtneo2-${TAG}-SukiSU-susfs.zip" . )
 
 cp "$PWD/out/.config" "$ORIGINAL/out/kernel.config"
 echo "==> 完成! 产物位于 out/:"
