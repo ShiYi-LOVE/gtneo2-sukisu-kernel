@@ -391,6 +391,33 @@ if p.exists():
         p.write_text(t)
         patched.append("drivers/soc/qcom/fsa4480-i2c.c: get_main_display block -> oplus_dp_support = false")
 
+# 19) drivers/usb/pd/policy_engine.c: pd_lobal 定义(514行)在 #ifdef OPLUS_FEATURE_CHG_BASIC
+#     内 (宏已闭源清理), 其余 4 处使用全在守卫块内 (死代码), 唯独 typec_is_otg_mode()
+#     (2091行) 无守卫引用 —— 官方源码漏包守卫。该函数全树零调用方、无 EXPORT_SYMBOL,
+#     整体移除零行为影响
+p = pathlib.Path("drivers/usb/pd/policy_engine.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ("bool typec_is_otg_mode(void)\n"
+           "{\n"
+           "\tif (pd_lobal != NULL)\n"
+           "\t\treturn pd_lobal->is_otg_mode;\n"
+           "\telse\n"
+           "\t\treturn false;\n"
+           "}\n")
+    if old in t:
+        t = t.replace(old,
+            "/* typec_is_otg_mode removed: references pd_lobal guarded by OPLUS_FEATURE_CHG_BASIC\n"
+            "   (closed in released source); function has no callers and no EXPORT_SYMBOL */\n", 1)
+        p.write_text(t)
+        patched.append("drivers/usb/pd/policy_engine.c: dead typec_is_otg_mode() removed")
+    elif "typec_is_otg_mode" in t:
+        # 兜底: 禁用函数体
+        t = re.sub(r"bool typec_is_otg_mode\(void\)\s*\{.*?\n\}",
+                   "/* typec_is_otg_mode removed (regex fallback) */", t, count=1, flags=re.S)
+        p.write_text(t)
+        patched.append("drivers/usb/pd/policy_engine.c: typec_is_otg_mode removed (regex fallback)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
