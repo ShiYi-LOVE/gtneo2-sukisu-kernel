@@ -217,6 +217,42 @@ if p.exists():
         p.write_text(t)
         patched.append("drivers/power/reset/msm-poweroff.c: file-local OPLUS_BUG_STABILITY enabled")
 
+# 14) drivers/power/supply/qcom/qpnp-fg-gen4.c: batt-therm probe 块无守卫引用
+#     chip->batt_therm_chan, 而该成员声明(287行)与全部其他用法都包在
+#     #ifdef OPLUS_FEATURE_CHG_BASIC 内 (宏已因缺失头文件被白名单清理) ——
+#     官方源码漏包守卫。给该 probe 块补上与其他用法一致的守卫
+p = pathlib.Path("drivers/power/supply/qcom/qpnp-fg-gen4.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ("\trc = of_property_match_string(fg->dev->of_node, \"io-channel-names\",\n"
+           "\t\t\t\t\t\"batt-therm\");\n"
+           "\n"
+           "\tif (rc >= 0) {\n"
+           "\t\tchip->batt_therm_chan = iio_channel_get(fg->dev, \"batt-therm\");\n"
+           "\t\t\tif (IS_ERR(chip->batt_therm_chan)) {\n"
+           "\t\t\trc = PTR_ERR(chip->batt_therm_chan);\n"
+           "\t\t\tif (rc != -EPROBE_DEFER)\n"
+           "\t\t\t\tpr_err(\"batt-therm channel unavailable, rc=%d\\n\", rc);\n"
+           "\t\t\tchip->batt_therm_chan = NULL;\n"
+           "\t\t\treturn rc;\n"
+           "\t\t}\n"
+           "\t}\n")
+    if old in t:
+        new = (old[:old.index("\tif (rc >= 0) {")]
+               + "#ifdef OPLUS_FEATURE_CHG_BASIC\n"
+               + old[old.index("\tif (rc >= 0) {"):]
+               + "#endif\n")
+        t = t.replace(old, new, 1)
+        p.write_text(t)
+        patched.append("drivers/power/supply/qcom/qpnp-fg-gen4.c: batt-therm probe block wrapped in OPLUS_FEATURE_CHG_BASIC")
+    elif "batt_therm_chan = iio_channel_get" in t:
+        # 兜底: 直接禁用引用未声明成员的 iio_channel_get 块
+        t = re.sub(r"\tif \(rc >= 0\) \{\s*chip->batt_therm_chan = iio_channel_get.*?\n\t\}\n",
+                   "/* fg-gen4: unguarded batt_therm_chan probe block removed */\n", t, count=1, flags=re.S)
+        if "batt_therm_chan = iio_channel_get" not in t:
+            p.write_text(t)
+            patched.append("drivers/power/supply/qcom/qpnp-fg-gen4.c: batt-therm probe block removed (regex fallback)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
