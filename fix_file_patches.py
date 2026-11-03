@@ -141,6 +141,39 @@ if p.exists():
         p.write_text(t)
         patched.append("drivers/block/zram/hybridswap/hybridswap_eswap.c: meminfo_show return type fixed (ssize_t)")
 
+# 10) drivers/iio/adc/qcom-spmi-adc5.c: .battemp_for_adc 字段设计符在发布的
+#     struct adc_data 中不存在 (闭源头文件未开源), 全文仅此一处引用 —— 删除该行
+p = pathlib.Path("drivers/iio/adc/qcom-spmi-adc5.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = "\t.battemp_for_adc = 1,\n"
+    if old in t:
+        t = t.replace(old, "")
+        p.write_text(t)
+        patched.append("drivers/iio/adc/qcom-spmi-adc5.c: removed .battemp_for_adc designator (field closed-source)")
+
+# 11) net/oplus_nwpower/oplus_nwpower.c: get_cached_platform_id()/LAGOON 均为闭源
+#     API (bitra 回填源中亦无定义)。GT Neo 2 为 kona 平台, platform_id == LAGOON
+#     (SM6350) 永不成立 —— 移除该平台检查, 函数行为在本设备上完全不变
+p = pathlib.Path("net/oplus_nwpower/oplus_nwpower.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ("        int platform_id = get_cached_platform_id();\n"
+           "        if (platform_id == LAGOON) {\n"
+           "                bts_net_clear();\n"
+           "        }\n")
+    if old in t:
+        t = t.replace(old, "")
+        p.write_text(t)
+        patched.append("net/oplus_nwpower/oplus_nwpower.c: removed closed-source platform check in bts_net_exist")
+    elif "get_cached_platform_id" in t:
+        # 缩进差异兜底: 用正则移除含两个符号的语句
+        t = re.sub(r"\s*int platform_id = get_cached_platform_id\(\);"
+                   r"\s*if \(platform_id == LAGOON\) \{\s*bts_net_clear\(\);\s*\}", "", t)
+        if "get_cached_platform_id" not in t:
+            p.write_text(t)
+            patched.append("net/oplus_nwpower/oplus_nwpower.c: platform check removed (regex fallback)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
