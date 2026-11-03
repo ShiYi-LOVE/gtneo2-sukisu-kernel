@@ -551,6 +551,23 @@ if p.exists():
         p.write_text(t)
         patched.append("drivers/power/supply/qcom/Makefile: + qpnp-smb5.o smb5-lib.o restored")
 
+# 30) drivers/esoc/esoc-mdm-4x.c: mdmreason_set (modem 重启原因记录, 实现闭源;
+#     第 2 个调用方, 第 29 轮 subsys-pil-tz.c 已处理第 1 个) -> 中性化,
+#     保留 __subsystem_send_uevent (开源, 定义于 subsystem_restart.c)
+p = pathlib.Path("drivers/esoc/esoc-mdm-4x.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    n = 0
+    old_a = '\t\t\t\t\tmdmreason_set("Force modem reset");\n'
+    if old_a in t:
+        t = t.replace(old_a, '\t\t\t\t\t/* mdmreason_set skipped: closed impl */\n', 1); n += 1
+    old_b = '\t\t\t\t\tmdmreason_set(sfr_buf2);\n'
+    if old_b in t:
+        t = t.replace(old_b, '\t\t\t\t\t/* mdmreason_set skipped: closed impl */\n', 1); n += 1
+    if n:
+        p.write_text(t)
+        patched.append(f"drivers/esoc/esoc-mdm-4x.c: {n} mdmreason_set calls neutered")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
