@@ -62,12 +62,17 @@ configure_kernel() {
   # oplus_invoke_syscall/oplus_exec_block/oplus_mount_block 闭源未发布,
   # 关闭后走各调用点 #else 的 stock CAF 路径
   ./scripts/config --file out/.config -d OPLUS_SECURE_GUARD || true
-  # === 必须保持 MODVERSIONS=y (原厂 defconfig 默认 y) ===
-  # r32 首刷卡 logo 的根因之一: 曾为绕开 CRC 报错关闭该项。
-  # 关闭后内核 vermagic 变成 "4.19.157-perf+ SMP preempt mod_unload aarch64",
-  # 而 /vendor/lib/modules/*.ko 的 vermagic 带 modversions 标志 —— 全部模块被拒载
-  # (触摸屏/显示/WLAN/音频/相机). 现在只编 Image 不编模块, 不会再触发原 CRC 报错。
-  ./scripts/config --file out/.config -e MODVERSIONS || true
+  # === MODVERSIONS 关闭 + vermagic 强制带 modversions (r33) ===
+  # 矛盾点: 原厂模块 vermagic 含 "modversions", 内核不带该标志则全部模块被拒载;
+  # 但开启 MODVERSIONS 会触发官方源码缺陷:
+  #   WARNING: EXPORT symbol "gsi_write_channel_scratch" version generation failed
+  #   ld.lld: relocation R_AARCH64_ABS32 cannot be used against symbol
+  #           '__crc_gsi_write_channel_scratch'; recompile with -fPIC
+  # (genksyms 解析不了该符号类型 -> __crc_ 未定义 -> vmlinux 链接必死)
+  # 解法: CONFIG_MODVERSIONS=n 绕开 CRC 机制 (不改变 struct module 布局),
+  #       再用 fix_file_patches 第31步把 "modversions " 硬写进 VERMAGIC_STRING。
+  #       模块加载时因 MODVERSIONS=n 不做 CRC 校验, 只比对 vermagic 字符串。
+  ./scripts/config --file out/.config -d MODVERSIONS || true
   # === 关闭模块签名强制校验 (保留 CONFIG_MODULE_SIG=y 以维持 struct module 布局,
   #     否则 module_layout 的 CRC 变更同样会让原厂模块拒载) ===
   # 我们没有 realme 的签名私钥, MODULE_SIG_FORCE=y 会拒绝加载所有原厂 vendor 模块。
@@ -271,6 +276,25 @@ assert d.rfind(b'\xd0\x0d\xfe\xed') < 0, 'FATAL: Image 内部混入了 dtb'
 print('  Image 校验通过: %d 字节 (%.1f MB), ARM64 魔数 OK, 无内嵌 dtb'
       % (len(d), len(d) / 1048576))
 PY
+
+# --- vermagic 逐字校验: 必须与 /vendor/lib/modules/*.ko 的 vermagic 完全一致,
+#     否则所有原厂 vendor 模块 (触摸/显示/WLAN/音频/相机) 全部拒载 -> 卡 logo ---
+echo "  --- vermagic 检查 ---"
+grep -E '^CONFIG_(LOCALVERSION|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE|PREEMPT|SMP)=' out/.config || true
+VERMAGIC_LINE=$(strings "$BOOT/Image" | grep -m1 -E '^4\.19\.[0-9]+.*SMP' || true)
+echo "  Image vermagic: [$VERMAGIC_LINE]"
+case "$VERMAGIC_LINE" in
+  *modversions*) echo "  OK: vermagic 含 modversions" ;;
+  *) echo "FATAL: vermagic 缺少 modversions 标志 (vendor 模块将全部拒载)"; exit 1 ;;
+esac
+case "$VERMAGIC_LINE" in
+  *preempt*) echo "  OK: vermagic 含 preempt" ;;
+  *) echo "WARN: vermagic 缺少 preempt 标志" ;;
+esac
+case "$VERMAGIC_LINE" in
+  "4.19.*-perf"*) echo "  OK: 版本串前缀匹配 4.19.x-perf" ;;
+  *) echo "WARN: 版本串异常, 原厂为 4.19.157-perf+" ;;
+esac
 
 AK3_URL="https://github.com/osm0sis/AnyKernel3"
 # 注意: 此时 cwd 仍为 kernel/ (编译目录), ../ 解析有歧义 —— 一律绝对路径。
