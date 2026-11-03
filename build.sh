@@ -62,10 +62,17 @@ configure_kernel() {
   # oplus_invoke_syscall/oplus_exec_block/oplus_mount_block 闭源未发布,
   # 关闭后走各调用点 #else 的 stock CAF 路径
   ./scripts/config --file out/.config -d OPLUS_SECURE_GUARD || true
-  # MODVERSIONS: gsi_write_channel_scratch 等闭源类型符号的 genksyms CRC 生成失败,
-  # 模块引用 __crc_ 符号时 R_AARCH64_ABS32 重定位报错; 自编译内核+自带模块无 ABI
-  # 兼容需求, 直接关闭
-  ./scripts/config --file out/.config -d MODVERSIONS || true
+  # === 必须保持 MODVERSIONS=y (原厂 defconfig 默认 y) ===
+  # r32 首刷卡 logo 的根因之一: 曾为绕开 CRC 报错关闭该项。
+  # 关闭后内核 vermagic 变成 "4.19.157-perf+ SMP preempt mod_unload aarch64",
+  # 而 /vendor/lib/modules/*.ko 的 vermagic 带 modversions 标志 —— 全部模块被拒载
+  # (触摸屏/显示/WLAN/音频/相机). 现在只编 Image 不编模块, 不会再触发原 CRC 报错。
+  ./scripts/config --file out/.config -e MODVERSIONS || true
+  # === 关闭模块签名强制校验 (保留 CONFIG_MODULE_SIG=y 以维持 struct module 布局,
+  #     否则 module_layout 的 CRC 变更同样会让原厂模块拒载) ===
+  # 我们没有 realme 的签名私钥, MODULE_SIG_FORCE=y 会拒绝加载所有原厂 vendor 模块。
+  ./scripts/config --file out/.config -e MODULE_SIG || true
+  ./scripts/config --file out/.config -d MODULE_SIG_FORCE || true
   make O=out ARCH=arm64 olddefconfig
 }
 
@@ -235,7 +242,7 @@ echo "  -Werror stripped from $(grep -rl --include='Makefile*' --include='Kbuild
 echo "==> [5/7] 配置内核: $DEFCONFIG..."
 configure_kernel
 
-echo "==> [6/7] 编译 Image.gz + dtbs (jobs=$JOBS, GNU as —— 4.19 老内核不兼容 LLVM 集成汇编器)..."
+echo "==> [6/7] 编译裸 Image (jobs=$JOBS, GNU as —— 4.19 老内核不兼容 LLVM 集成汇编器)..."
 BUILD_FLAGS=(O=out ARCH=arm64 SUBARCH=arm64
   CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
   LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -243,17 +250,27 @@ BUILD_FLAGS=(O=out ARCH=arm64 SUBARCH=arm64
   # Clang -Werror 会全部升级为错误 —— 全局降级, 真正的链接错误仍会正常失败
   KCFLAGS="-Wno-error")
 
-if ! make "${BUILD_FLAGS[@]}" -j"$JOBS" Image.gz dtbs; then
+# 只编 Image (未压缩). 原厂 boot.img 实测 KERNEL_FMT=raw, 47MB 未压缩且内核尾部
+# 无内嵌 FDT; 设备树走 boot 镜像里独立的 15.8MB dtb 段 (magiskboot 重打包时原样保留)。
+# 之前发 Image.gz-dtb 是 r32 卡 logo 的根因之二: realme abl 不解压 gzip kernel。
+if ! make "${BUILD_FLAGS[@]}" -j"$JOBS" Image; then
   echo "!! 编译失败，清理后重试一次..."
   rm -rf out
   configure_kernel
-  make "${BUILD_FLAGS[@]}" -j"$JOBS" Image.gz dtbs
+  make "${BUILD_FLAGS[@]}" -j"$JOBS" Image
 fi
 
-echo "==> [7/7] 打包 Image.gz-dtb 与 AnyKernel3 卡刷包..."
+echo "==> [7/7] 打包裸 Image 与 AnyKernel3 卡刷包..."
 BOOT="$PWD/out/arch/arm64/boot"
-find "$BOOT/dts" -name '*.dtb' -type f | sort | xargs cat > "$BOOT/dtb.concat"
-cat "$BOOT/Image.gz" "$BOOT/dtb.concat" > "$BOOT/Image.gz-dtb"
+ls -lh "$BOOT/Image"
+python3 - "$BOOT/Image" <<'PY'
+import sys
+d = open(sys.argv[1], 'rb').read()
+assert d[0x38:0x3c] == b'ARM\x64', 'FATAL: 不是标准 ARM64 Image'
+assert d.rfind(b'\xd0\x0d\xfe\xed') < 0, 'FATAL: Image 内部混入了 dtb'
+print('  Image 校验通过: %d 字节 (%.1f MB), ARM64 魔数 OK, 无内嵌 dtb'
+      % (len(d), len(d) / 1048576))
+PY
 
 AK3_URL="https://github.com/osm0sis/AnyKernel3"
 # 注意: 此时 cwd 仍为 kernel/ (编译目录), ../ 解析有歧义 —— 一律绝对路径。
@@ -275,10 +292,17 @@ for i in 1 2 3 4 5 6; do
 done
 rm -rf "$AK3_DIR/.git"
 cp "$ORIGINAL/ak3/anykernel.sh" "$AK3_DIR/anykernel.sh"
-cp "$BOOT/Image.gz-dtb" "$AK3_DIR/"
+cp "$BOOT/Image" "$AK3_DIR/"
 mkdir -p "$ORIGINAL/out"
 ( cd "$AK3_DIR" && zip -r9 "$ORIGINAL/out/AK3-gtneo2-${TAG}-SukiSU-susfs.zip" . )
 
 cp "$PWD/out/.config" "$ORIGINAL/out/kernel.config"
+cp "$BOOT/Image" "$ORIGINAL/out/Image"
+# 记录实际 vermagic 与本机 defconfig 关键项, 便于和原厂 4.19.157-perf+ 逐字比对
+{
+  echo "== 本构建内核版本/vermagic 期望值 =="
+  cat include/config/kernel.release 2>/dev/null || true
+  grep -E '^CONFIG_(LOCALVERSION|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE|SMP|PREEMPT)=' out/.config || true
+} > "$ORIGINAL/out/vermagic-info.txt"
 echo "==> 完成! 产物位于 out/:"
 ls -lh "$ORIGINAL/out/"
