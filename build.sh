@@ -45,7 +45,23 @@ KSU_CONFIG_OPTS=(
 )
 
 configure_kernel() {
-  make O=out ARCH=arm64 SUBARCH=arm64 "$DEFCONFIG"
+  mkdir -p out
+  # === 基线选择 (r34 核心修复) ===
+  # 原厂内核开了 CONFIG_IKCONFIG, 其 .config 以 gzip 形式内嵌在 Image 里。
+  # 从用户原厂 boot.img 提取出 5504 项真实配置 (stock.config), 与源码里的
+  # vendor/kona-perf_defconfig 相比有 234 项差异 —— 其中 130 项是原厂真实开启
+  # 而我们全部丢失的 OPLUS_*(64)/TOUCHPANEL_*(18) 等功能。用 defconfig 当基线
+  # 等于凭空造一个和原厂功能集不同的内核, vendor 模块按原厂结构体布局访问会错位。
+  # 现在直接用原厂实测配置当基线, olddefconfig 会自动丢弃本源码树不存在的符号
+  # (未开源的组件) 并补齐 SukiSU/SusFS 新增项。
+  if [ -f "$ORIGINAL/stock.config" ]; then
+    echo "  --> 基线: 原厂实测 stock.config (从原厂内核 IKCONFIG 提取)"
+    cp "$ORIGINAL/stock.config" out/.config
+    make O=out ARCH=arm64 SUBARCH=arm64 olddefconfig
+  else
+    echo "  --> 基线: $DEFCONFIG (!! 与原厂实际配置存在数百项漂移)"
+    make O=out ARCH=arm64 SUBARCH=arm64 "$DEFCONFIG"
+  fi
   for opt in "${KSU_CONFIG_OPTS[@]}"; do
     ./scripts/config --file out/.config -e "$opt" || true
   done
@@ -80,6 +96,65 @@ configure_kernel() {
   ./scripts/config --file out/.config -e MODULE_SIG || true
   ./scripts/config --file out/.config -d MODULE_SIG_FORCE || true
   make O=out ARCH=arm64 olddefconfig
+
+  # === 硬性断言 (r34) ===
+  # 之前三轮都出现过"编译通过、产物看起来正常、刷进去却卡开机 logo"的情况,
+  # 根因是 Kconfig 里符号根本不存在导致配置被静默丢弃 (ext4/erofs 就是这样丢的)。
+  # 这里在编译前就把必需项钉死, 缺一个直接失败, 不再产出开不了机的内核。
+  python3 - out/.config <<'PY'
+import re, sys
+
+cfg = {}
+for line in open(sys.argv[1], errors='ignore'):
+    line = line.strip()
+    m = re.match(r'^(CONFIG_[A-Z0-9_]+)=(.*)$', line)
+    if m:
+        cfg[m.group(1)] = m.group(2)
+
+must_y = [
+    ('CONFIG_EXT4_FS', 'ext4: /metadata 走 first_stage_mount, 缺失则第一阶段 init 卡死'),
+    ('CONFIG_JBD2', 'ext4 日志层'),
+    ('CONFIG_EROFS_FS', 'system/vendor 等只读分区可能为 erofs'),
+    ('CONFIG_EROFS_FS_ZIP', 'erofs 压缩镜像支持'),
+    ('CONFIG_F2FS_FS', '/data 分区'),
+    ('CONFIG_FS_ENCRYPTION', '/data 文件级加密 (FBE)'),
+    ('CONFIG_EXFAT_FS', '原厂启用, 外接存储'),
+    ('CONFIG_TMPFS', 'init 根文件系统'),
+    ('CONFIG_BLK_DEV_INITRD', 'ramdisk 引导'),
+    ('CONFIG_MODULES', '加载原厂 vendor 模块'),
+    ('CONFIG_MODULE_SIG', '维持 struct module 布局 (不能关)'),
+]
+must_n = [
+    ('CONFIG_MODULE_SIG_FORCE', '无真我签名私钥, 强制校验会拒载全部原厂模块'),
+    ('CONFIG_MODVERSIONS', '官方源码 genksyms 缺陷, 改由 vermagic 硬写补标志'),
+]
+su_items = ['CONFIG_KSU', 'CONFIG_KSU_SUSFS']
+
+bad = []
+for k, why in must_y:
+    v = cfg.get(k)
+    if v != 'y':
+        bad.append('%s = %s  (应为 y; %s)' % (k, v if v is not None else '<符号不存在>', why))
+for k, why in must_n:
+    v = cfg.get(k)
+    if v not in (None, 'n'):
+        bad.append('%s = %s  (应为 n; %s)' % (k, v, why))
+
+print('  --- 关键配置核对 ---')
+for k, _ in must_y:
+    print('    %-28s = %s' % (k, cfg.get(k, '<缺失>')))
+for k, _ in must_n:
+    print('    %-28s = %s' % (k, cfg.get(k, '<缺失>')))
+for k in su_items:
+    print('    %-28s = %s' % (k, cfg.get(k, '<缺失>')))
+
+if bad:
+    print('FATAL: 配置断言失败, 该内核必然无法开机:')
+    for b in bad:
+        print('   - ' + b)
+    sys.exit(1)
+print('  OK: 文件系统与模块配置齐全')
+PY
 }
 
 echo "==> [1/7] 拉取真我官方 Android T 内核源码 (kernel 4.19.157)..."
@@ -169,6 +244,14 @@ fi   # SKIP_SU 只跳过 rootkit 本体, 3b 之后的 Kconfig/回填/治愈补�
 
 echo "==> [3b] Kconfig 占位修复 (Oplus 发布源码缺失的 Kconfig 文件)..."
 python3 "$ORIGINAL/kconfig_stubs.py" || echo "!! 占位脚本异常，继续构建"
+
+# === [3b2] 必须紧跟在 kconfig_stubs 之后 ===
+# kconfig_stubs 会把 fs/oext4、fs/erofs、fs/exfat 三个失效符号链接重建成空目录,
+# 导致 CONFIG_EXT4_FS/EROFS_FS/EXFAT_FS 三个符号在 Kconfig 里消失 -> 配置被静默丢弃
+# -> 内核没有 ext4/erofs -> /metadata(first_stage_mount) 挂不上 -> 卡开机 logo。
+# 用 realme 同厂商 AndroidR 源码仓库里完整发布的这三个目录覆盖回来。
+echo "==> [3b2] 补回未开源的文件系统组件 (oext4/erofs/exfat)..."
+python3 "$ORIGINAL/fs_restore.py" "$ORIGINAL/fs_vendor.zip" || { echo "FATAL: 文件系统组件补全失败"; exit 1; }
 
 if [ "${SKIP_SU:-0}" = "1" ]; then
   echo "==> [3c] SKIP_SU=1: 跳过 susfs 适配补丁与 KSU_SUSFS Kconfig 注入"
