@@ -9,6 +9,7 @@ DEFCONFIG="${1:?usage: build.sh <defconfig> [tag]}"
 TAG="${2:-kernel}"
 ORIGINAL="$PWD"
 JOBS=$(nproc --all)
+if [ "${SKIP_SU:-0}" = "1" ]; then SUFFIX="stock"; else SUFFIX="SukiSU-susfs"; fi
 
 KERNEL_URL="https://github.com/realme-kernel-opensource/realme_GTneo2-Q5pro-GTMasterExploratory-AndroidT-kernel-source"
 SUSFS_URL="https://gitlab.com/simonpunk/susfs4ksu"
@@ -130,6 +131,11 @@ sed -i -e '/export CONFIG_OPLUS_SECURE_GUARD/d'  -e '/DCONFIG_OPLUS_SECURE_GUARD
        -e '/DCONFIG_OPLUS_EXECVE_REPORT/d' OplusKernelEnvConfig.mk
 echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO macros removed; SECURE_GUARD/MOUNT_BLOCK/EXECVE force-exports removed"
 
+# SKIP_SU=1 时跳过 SukiSU/SusFS, 产出纯净对照内核 (用于定位卡 logo 是否由 rootkit 引起)
+if [ "${SKIP_SU:-0}" = "1" ]; then
+  echo "==> [2/7][3/7] SKIP_SU=1: 跳过 SukiSU/SusFS, 构建纯净对照版"
+else
+
 echo "==> [2/7] 集成 SukiSU-Ultra (main 分支, kprobe hook)..."
 SU_BASES=("https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
   "https://gh-proxy.com/https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh"
@@ -223,6 +229,8 @@ python3 "$ORIGINAL/fix_oplus_macros.py" || echo "!! 宏清理脚本异常，继�
 
 echo "==> [3d2] 文件级修补 (vmscan/printk 闭源符号缺失 -> 还原 stock 行为)..."
 python3 "$ORIGINAL/fix_file_patches.py" || echo "!! 文件修补脚本异常，继续构建"
+
+fi   # end of SKIP_SU guard
 
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
 mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
@@ -318,7 +326,7 @@ rm -rf "$AK3_DIR/.git"
 cp "$ORIGINAL/ak3/anykernel.sh" "$AK3_DIR/anykernel.sh"
 cp "$BOOT/Image" "$AK3_DIR/"
 mkdir -p "$ORIGINAL/out"
-( cd "$AK3_DIR" && zip -r9 "$ORIGINAL/out/AK3-gtneo2-${TAG}-SukiSU-susfs.zip" . )
+( cd "$AK3_DIR" && zip -r9 "$ORIGINAL/out/AK3-gtneo2-${TAG}-${SUFFIX}.zip" . )
 
 cp "$PWD/out/.config" "$ORIGINAL/out/kernel.config"
 cp "$BOOT/Image" "$ORIGINAL/out/Image"
