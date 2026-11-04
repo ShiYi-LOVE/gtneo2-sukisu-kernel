@@ -165,14 +165,20 @@ cp -f ../susfs/kernel_patches/include/linux/susfs.h include/linux/ 2>/dev/null |
 cp -f ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/ 2>/dev/null || true
 ls fs/susfs.c include/linux/susfs.h
 
+fi   # SKIP_SU 只跳过 rootkit 本体, 3b 之后的 Kconfig/回填/治愈补丁仍然必须执行
+
 echo "==> [3b] Kconfig 占位修复 (Oplus 发布源码缺失的 Kconfig 文件)..."
 python3 "$ORIGINAL/kconfig_stubs.py" || echo "!! 占位脚本异常，继续构建"
 
+if [ "${SKIP_SU:-0}" = "1" ]; then
+  echo "==> [3c] SKIP_SU=1: 跳过 susfs 适配补丁与 KSU_SUSFS Kconfig 注入"
+else
 echo "==> [3c] 应用 susfs realme 适配补丁 (官方 hunk 不兼容 Oplus 源码的 5 处)..."
 python3 "$ORIGINAL/fix_susfs.py" || echo "!! susfs 适配脚本异常，继续构建"
 
 echo "==> [3c1] 注入 KSU_SUSFS Kconfig 定义 (SukiSU main 不自带, 缺失则 susfs 全部静默失效)..."
 python3 "$ORIGINAL/susfs_kconfig.py" || { echo "FATAL: KSU_SUSFS Kconfig 注入/自检失败"; exit 1; }
+fi
 
 echo "==> [3c2] 从社区 bitra 内核回填 Oplus 闭源组件 (system/device_info/sensor/thermal)..."
 # realme 官方源码 drivers/soc/oplus/{system,device_info,sensor,thermal} 和 include/soc/oplus
@@ -229,8 +235,6 @@ python3 "$ORIGINAL/fix_oplus_macros.py" || echo "!! 宏清理脚本异常，继�
 
 echo "==> [3d2] 文件级修补 (vmscan/printk 闭源符号缺失 -> 还原 stock 行为)..."
 python3 "$ORIGINAL/fix_file_patches.py" || echo "!! 文件修补脚本异常，继续构建"
-
-fi   # end of SKIP_SU guard
 
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
 mkdir -p "$PWD/neutron-clang" && cd "$PWD/neutron-clang"
