@@ -716,6 +716,82 @@ if fw.exists():
         fw.write_text(t)
         patched.append("drivers/kernelsu/infra/file_wrapper.c: iopoll>=5.1 / remap>=5.0 守卫")
 
+# 36) SukiSU 还有两处 5.x 专属 API, 4.19 上编译必挂 (本轮提前补, 不让它再烧一轮):
+#   (a) TWA_RESUME / TWA_NMI_CURRENT: 4.19 的 task_work_add() 第三参是 bool,
+#       没有 5.9 引入的 enum task_work_notify_mode。pkg_observer.c 自己定义了,
+#       但 allowlist.c / supercall.c 没有 -> 全局补在 linux/task_work.h
+#       里 (bool 传 true == notify, 语义等价)。
+#   (b) path_umount(): 5.9 才有的导出符号, 4.19 的 fs/namespace.c 只有
+#       ksys_umount(char __user *, int)。feature/kernel_umount.c 直接 extern
+#       声明了它并在 ksu_umount_mnt() 里调用 -> 链接期 undefined。
+#       用 d_path + set_fs(KERNEL_DS) + ksys_umount 做等价实现。
+tw = pathlib.Path("include/linux/task_work.h")
+if tw.exists():
+    t = tw.read_text(errors="ignore")
+    if "OPLUS_419_COMPAT_TWA" not in t:
+        anchor = "int task_work_add(struct task_struct *task, struct callback_head *twork, bool);"
+        block = ("/* OPLUS_419_COMPAT_TWA: 4.19 第三参是 bool, 无 TWA_* 枚举 (5.9+) */\n"
+                 "#ifndef TWA_RESUME\n"
+                 "#define TWA_RESUME true\n"
+                 "#endif\n"
+                 "#ifndef TWA_NMI_CURRENT\n"
+                 "#define TWA_NMI_CURRENT true\n"
+                 "#endif\n\n")
+        if anchor in t:
+            t = t.replace(anchor, block + anchor, 1)
+            tw.write_text(t)
+            patched.append("include/linux/task_work.h: TWA_RESUME/TWA_NMI_CURRENT -> true")
+
+ku = pathlib.Path("drivers/kernelsu/feature/kernel_umount.c")
+if ku.exists():
+    t = ku.read_text(errors="ignore")
+    if "OPLUS_419_COMPAT_PATH_UMOUNT" not in t:
+        old = ("extern int path_umount(struct path *path, int flags);\n"
+               "\n"
+               "static void ksu_umount_mnt(const char *mnt, struct path *path, int flags)\n"
+               "{\n"
+               "    int err = path_umount(path, flags);\n")
+        new = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n"
+               "extern int path_umount(struct path *path, int flags);\n"
+               "#define ksu_do_path_umount(p, f) path_umount((p), (f))\n"
+               "#else\n"
+               "/* OPLUS_419_COMPAT_PATH_UMOUNT: 4.19 无 path_umount(), 用\n"
+               " * d_path + set_fs(KERNEL_DS) + ksys_umount 做等价实现 */\n"
+               "#include <linux/dcache.h>\n"
+               "#include <linux/syscalls.h>\n"
+               "#include <asm/uaccess.h>\n"
+               "static int ksu_do_path_umount(struct path *path, int flags)\n"
+               "{\n"
+               "    int err;\n"
+               "    char *page = (char *)__get_free_page(GFP_KERNEL);\n"
+               "    char *name;\n"
+               "    mm_segment_t old_fs;\n"
+               "\n"
+               "    if (!page)\n"
+               "        return -ENOMEM;\n"
+               "    name = d_path(path, page, PAGE_SIZE);\n"
+               "    if (IS_ERR(name)) {\n"
+               "        err = PTR_ERR(name);\n"
+               "        free_page((unsigned long)page);\n"
+               "        return err;\n"
+               "    }\n"
+               "    old_fs = get_fs();\n"
+               "    set_fs(KERNEL_DS);\n"
+               "    err = ksys_umount(name, flags);\n"
+               "    set_fs(old_fs);\n"
+               "    free_page((unsigned long)page);\n"
+               "    return err;\n"
+               "}\n"
+               "#endif\n"
+               "\n"
+               "static void ksu_umount_mnt(const char *mnt, struct path *path, int flags)\n"
+               "{\n"
+               "    int err = ksu_do_path_umount(path, flags);\n")
+        if old in t:
+            t = t.replace(old, new, 1)
+            ku.write_text(t)
+            patched.append("drivers/kernelsu/feature/kernel_umount.c: path_umount -> ksys_umount 兼容实现")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
