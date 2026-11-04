@@ -633,6 +633,26 @@ if p.exists():
         p.write_text(t)
         patched.append("include/linux/module.h: MODULE_IMPORT_NS no-op (4.19)")
 
+# 34) include/linux/pgtable.h: SukiSU 的 feature/sucompat.c 无条件
+#     #include <linux/pgtable.h>, 该头是 5.x 才从 arch/*/include/asm/pgtable.h
+#     拆出来的公共层, 4.19 的 include/linux 下没有这个文件
+#     -> fatal error: 'linux/pgtable.h' file not found
+#     做法: 建一个转发头, 4.19 的等价内容就在 asm/pgtable.h。
+#     已确认同一文件里 #include <linux/static_call.h> 有 >=6.12 守卫, 无需补;
+#     <linux/version.h> 由 kbuild 生成, 能正常解析 (core/init.c 已编过)。
+pg = pathlib.Path("include/linux/pgtable.h")
+if not pg.exists():
+    pg.parent.mkdir(parents=True, exist_ok=True)
+    pg.write_text(
+        "/* OPLUS_COMPAT_LINUX_PGTABLE_H: 4.19 无 include/linux/pgtable.h,\n"
+        " * 该头 5.x 才从 asm/pgtable.h 拆出; SukiSU 无条件包含, 这里做转发。 */\n"
+        "#ifndef _LINUX_PGTABLE_H\n"
+        "#define _LINUX_PGTABLE_H\n"
+        "#include <asm/pgtable.h>\n"
+        "#endif\n"
+    )
+    patched.append("include/linux/pgtable.h: shim -> asm/pgtable.h (4.19 无此头)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
