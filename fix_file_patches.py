@@ -653,6 +653,69 @@ if not pg.exists():
     )
     patched.append("include/linux/pgtable.h: shim -> asm/pgtable.h (4.19 无此头)")
 
+# 35) drivers/kernelsu/infra/file_wrapper.c: SukiSU 该文件按 5.x 基线写,
+#     用了两个 4.19 的 struct file_operations 里不存在的成员:
+#       iopoll            -> 5.1 才有 (4.19 的 fops 无此成员)
+#       remap_file_range  -> 5.0 才有, REMAP_FILE_DEDUP 同样 5.0 才有
+#     报错: no member named 'iopoll' / 'remap_file_range'; use of undeclared
+#           identifier 'REMAP_FILE_DEDUP'
+#     做法: 给这四段(两个函数 + 两处赋值)加 >= 5.1 / >= 5.0 守卫; 不赋值时
+#     成员保持 0, 语义等价于"内核不支持该操作", 4.19 上本来就该是 0。
+fw = pathlib.Path("drivers/kernelsu/infra/file_wrapper.c")
+if fw.exists():
+    t = fw.read_text(errors="ignore")
+    orig_t = t
+    if "OPLUS_419_NO_IOPOLL" not in t:
+        # (a) iopoll 函数体整体包起来
+        old_a = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)\n"
+                 "static int ksu_wrapper_iopoll(struct kiocb *kiocb, struct io_comp_batch *icb, unsigned int v)")
+        new_a = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) /* OPLUS_419_NO_IOPOLL */\n"
+                 "#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)\n"
+                 "static int ksu_wrapper_iopoll(struct kiocb *kiocb, struct io_comp_batch *icb, unsigned int v)")
+        if old_a in t:
+            t = t.replace(old_a, new_a, 1)
+        old_a2 = ("    return orig->f_op->iopoll(kiocb, spin);\n"
+                  "}\n"
+                  "#endif\n")
+        new_a2 = ("    return orig->f_op->iopoll(kiocb, spin);\n"
+                  "}\n"
+                  "#endif\n"
+                  "#endif /* LINUX_VERSION_CODE < 5.1: 4.19 无 f_op->iopoll */\n")
+        if old_a2 in t:
+            t = t.replace(old_a2, new_a2, 1)
+        # (b) 赋值处守卫
+        old_b = "    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n"
+        new_b = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n"
+                 "    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n"
+                 "#endif\n")
+        if old_b in t:
+            t = t.replace(old_b, new_b, 1)
+        # (c) remap_file_range 函数体
+        old_c = ("static loff_t ksu_wrapper_remap_file_range(struct file *file_in, loff_t pos_in, struct file *file_out, loff_t pos_out,")
+        new_c = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) /* OPLUS_419_NO_REMAP */\n"
+                 "static loff_t ksu_wrapper_remap_file_range(struct file *file_in, loff_t pos_in, struct file *file_out, loff_t pos_out,")
+        if old_c in t:
+            t = t.replace(old_c, new_c, 1)
+        old_c2 = ("        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n"
+                  "    }\n"
+                  "}\n")
+        new_c2 = ("        return orig->f_op->remap_file_range(orig, pos_in, file_out, pos_out, len, remap_flags);\n"
+                  "    }\n"
+                  "}\n"
+                  "#endif /* LINUX_VERSION_CODE < 5.0: 4.19 无 remap_file_range */\n")
+        if old_c2 in t:
+            t = t.replace(old_c2, new_c2, 1)
+        # (d) 赋值处守卫
+        old_d = "    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n"
+        new_d = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n"
+                 "    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n"
+                 "#endif\n")
+        if old_d in t:
+            t = t.replace(old_d, new_d, 1)
+    if t != orig_t:
+        fw.write_text(t)
+        patched.append("drivers/kernelsu/infra/file_wrapper.c: iopoll>=5.1 / remap>=5.0 守卫")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
