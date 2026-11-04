@@ -792,6 +792,42 @@ if ku.exists():
             ku.write_text(t)
             patched.append("drivers/kernelsu/feature/kernel_umount.c: path_umount -> ksys_umount 兼容实现")
 
+# 37) drivers/kernelsu/infra/seccomp_cache.c: 该文件重定义了 struct seccomp_filter
+#     以便直接 set_bit 内核的 action_cache 位图, 用到的
+#       SECCOMP_ARCH_NATIVE_NR / SECCOMP_ARCH_COMPAT_NR / struct action_cache
+#     全部是 5.x 才有的 (4.19 的 seccomp_filter 里根本没有 cache 成员)。
+#     报错: use of undeclared identifier 'SECCOMP_ARCH_NATIVE_NR'
+#     4.19 上这两个 helper 退化为空操作 —— 少一层 seccomp 放行缓存加速而已,
+#     功能不受影响 (setuid_hook 里仍会走正常的 seccomp 放行路径)。
+#     注意: 不能在 4.19 上照抄其结构体布局, 写错位等于踩内存。
+sc = pathlib.Path("drivers/kernelsu/infra/seccomp_cache.c")
+if sc.exists():
+    t = sc.read_text(errors="ignore")
+    if "OPLUS_419_NO_SECCOMP_CACHE" not in t:
+        idx = t.find("struct action_cache {")
+        if idx > 0:
+            head = ("/* OPLUS_419_NO_SECCOMP_CACHE: 4.19 的 struct seccomp_filter 无\n"
+                    " * action_cache 成员, 也没有 SECCOMP_ARCH_*_NR; 直接照抄 5.x 布局\n"
+                    " * 会写坏内存, 故退化为空操作。 */\n"
+                    "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)\n\n"
+                    "void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr)\n"
+                    "{\n"
+                    "    (void)filter;\n"
+                    "    (void)nr;\n"
+                    "}\n\n"
+                    "void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)\n"
+                    "{\n"
+                    "    (void)filter;\n"
+                    "    (void)nr;\n"
+                    "}\n\n"
+                    "#else\n\n")
+            t = t[:idx] + head + t[idx:]
+            if not t.endswith("\n"):
+                t += "\n"
+            t += "\n#endif /* LINUX_VERSION_CODE < 5.0: 无 seccomp action_cache */\n"
+            sc.write_text(t)
+            patched.append("drivers/kernelsu/infra/seccomp_cache.c: 4.19 退化为空操作")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
