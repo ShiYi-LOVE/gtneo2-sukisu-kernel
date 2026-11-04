@@ -606,6 +606,33 @@ if p.exists():
                 p.write_text(t)
                 patched.append("kernel/module.c: module_sig_check accepts any signature")
 
+# 33) include/linux/module.h: SukiSU-Ultra main 分支 kernel/core/init.c 末尾无条件写
+#     MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#     该宏是 5.4 才有的"符号命名空间"机制, 4.19 完全没有定义
+#     -> 预处理后剩 `MODULE_IMPORT_NS(X);` 裸标识符, clang 报
+#        282:1 warning: type specifier missing, defaults to 'int'
+#        282:18 error: a parameter list without types is only allowed in a function definition
+#     4.19 没有命名空间导出/导入这回事, 直接定义为空宏即可 (语义等价于"不需要导入")。
+p = pathlib.Path("include/linux/module.h")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "OPLUS_COMPAT_MODULE_IMPORT_NS" not in t:
+        block = (
+            "/* OPLUS_COMPAT_MODULE_IMPORT_NS: 4.19 无符号命名空间, SukiSU 用到该宏 */\n"
+            "#ifndef MODULE_IMPORT_NS\n"
+            "#define MODULE_IMPORT_NS(ns)\n"
+            "#endif\n"
+        )
+        guard = "#define _LINUX_MODULE_H\n"
+        idx = t.find(guard)
+        if idx >= 0:
+            ins = idx + len(guard)
+            t = t[:ins] + block + t[ins:]
+        else:
+            t = t + "\n" + block
+        p.write_text(t)
+        patched.append("include/linux/module.h: MODULE_IMPORT_NS no-op (4.19)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
