@@ -80,7 +80,6 @@ checks = {
     "fs/exfat/exfat_core.c": "exfat",
     "fs/ext4/super.c": "ext4",
     "fs/jbd2/journal.c": "",
-    "fs/crypto/keyinfo.c": "",
 }
 bad = []
 for f, kw in checks.items():
@@ -98,6 +97,23 @@ for f, kw in checks.items():
             bad.append("%s 不含 %r" % (f, kw))
             continue
     print("   OK %-24s %6d 字节" % (f, size))
+
+# fs/crypto 在本树是 OPPO 回移的新版布局 (crypto.c/fname.c/policy.c/
+# keysetup.c/keyring.c, 没有 4.19 原版的 keyinfo.c), 只做目录级自适应校验:
+#   Kconfig + Makefile 必须在, 且 .c 文件不少于 4 个
+crypto_dir = ROOT / "fs/crypto"
+if not crypto_dir.is_dir():
+    bad.append("fs/crypto 目录不存在")
+else:
+    c_files = sorted(p.name for p in crypto_dir.glob("*.c") if p.stat().st_size > 0)
+    for req in ("Kconfig", "Makefile"):
+        rp = crypto_dir / req
+        if not rp.is_file() or rp.stat().st_size == 0:
+            bad.append("fs/crypto/%s 缺失" % req)
+    if len(c_files) < 4:
+        bad.append("fs/crypto 只有 %d 个非空 .c (%s)" % (len(c_files), ",".join(c_files) or "none"))
+    else:
+        print("   OK %-24s %6d 个 .c: %s" % ("fs/crypto", len(c_files), ",".join(c_files)))
 
 if bad:
     print("FATAL: 文件系统源码补全失败 -> " + "; ".join(bad))
