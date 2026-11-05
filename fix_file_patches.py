@@ -1032,6 +1032,172 @@ if pkg.exists():
         pkg.write_text(t)
         patched.append("drivers/kernelsu/manager/pkg_observer.c: fsnotify handle_event 移植 + FS_MOVE 别名")
 
+# 41) 4.19 缺失 API 的兼容 shim
+#     SukiSU 是编进 vmlinux 的 (drivers/kernelsu, obj-y), 不受 EXPORT_SYMBOL 限制,
+#     所以"未导出"不是问题; 但 5.x 才引入的函数/宏在 4.19 树里连声明都没有,
+#     编译期就成了 implicit declaration, 链接期变 undefined symbol.
+#     r45 实测暴露:
+#       fallthrough                       (5.4 语句)      policy/allowlist.c
+#       strscpy_pad                       (5.1 函数)      policy/allowlist.c
+#       kvcalloc                          (5.1 inline)    supercall/dispatch.c
+#       copy_to_kernel_nofault            (5.8 函数)      hook/arm64/patch_memory.c
+#       strncpy_from_user_nofault         (5.8 函数)      sucompat/sulog
+#       untagged_addr                     (5.4 宏)        sulog/event.c
+#       security_inode_init_security_anon (5.13 函数)     infra/file_wrapper.c
+#     同时 bigshot 树自身也有个洞: include/linux/healthinfo/ion.h 声明了
+#     ion_total_size / ion_total(), 但树里没有任何实现 -> fs/proc/meminfo.c 引用成隐式声明
+def _insert_before_guard_end(rel_path, marker, code_block):
+    """在 include guard 的最后一个 #endif 之前插入, 避免落到 guard 外面被重复展开"""
+    p = pathlib.Path(rel_path)
+    if not p.exists():
+        return False
+    t = p.read_text(errors="ignore")
+    if marker in t:
+        return False
+    lines = t.split("\n")
+    idx = None
+    # 优先落在 __KERNEL__ 块内部 (mm.h 这类头把内核态代码包在 #ifdef __KERNEL__ 里,
+    # 插到块外面会让 shim 依赖的 kvmalloc_array 在非内核态上下文里可见性改变)
+    for i, l in enumerate(lines):
+        if l.lstrip().startswith("#endif") and "__KERNEL__" in l:
+            idx = i
+            break
+    if idx is None:
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].lstrip().startswith("#endif"):
+                idx = i
+                break
+    if idx is None:
+        return False
+    lines[idx:idx] = code_block.split("\n")
+    p.write_text("\n".join(lines))
+    return True
+
+
+SHIMS = [
+    ("include/linux/compiler.h", "OPLUS_419_FALLTHROUGH",
+     "/* OPLUS 4.19 COMPAT: fallthrough 语句为 5.4 引入, 此处退化为空语句 */\n"
+     "#ifndef OPLUS_419_FALLTHROUGH\n"
+     "#define OPLUS_419_FALLTHROUGH\n"
+     "#ifndef fallthrough\n"
+     "#define fallthrough do { } while (0)\n"
+     "#endif\n"
+     "#endif\n"),
+    ("include/linux/string.h", "OPLUS_419_STRSCPY_PAD",
+     "/* OPLUS 4.19 COMPAT: strscpy_pad 为 5.1 引入 */\n"
+     "#ifndef OPLUS_419_STRSCPY_PAD\n"
+     "#define OPLUS_419_STRSCPY_PAD\n"
+     "static inline ssize_t strscpy_pad(char *dest, const char *src, size_t count)\n"
+     "{\n"
+     "\tssize_t written = strscpy(dest, src, count);\n"
+     "\n"
+     "\tif (count > 0) {\n"
+     "\t\tsize_t i = written < 0 ? 0 : (size_t)written;\n"
+     "\n"
+     "\t\tfor (; i < count; i++)\n"
+     "\t\t\tdest[i] = '\\0';\n"
+     "\t}\n"
+     "\treturn written;\n"
+     "}\n"
+     "#endif\n"),
+    ("include/linux/mm.h", "OPLUS_419_KVCALLOC",
+     "/* OPLUS 4.19 COMPAT: kvcalloc 为 5.1 引入 */\n"
+     "#ifndef OPLUS_419_KVCALLOC\n"
+     "#define OPLUS_419_KVCALLOC\n"
+     "static inline void *kvcalloc(size_t n, size_t size, gfp_t flags)\n"
+     "{\n"
+     "\treturn kvmalloc_array(n, size, flags | __GFP_ZERO);\n"
+     "}\n"
+     "#endif\n"),
+    ("include/linux/uaccess.h", "OPLUS_419_NOFAULT",
+     "/* OPLUS 4.19 COMPAT: nofault 系列 (5.8) 与 untagged_addr (5.4) 回落到 4.19 等价实现 */\n"
+     "#ifndef OPLUS_419_NOFAULT\n"
+     "#define OPLUS_419_NOFAULT\n"
+     "#ifndef copy_to_kernel_nofault\n"
+     "#define copy_to_kernel_nofault(dst, src, size) probe_kernel_write(dst, src, size)\n"
+     "#endif\n"
+     "#ifndef strncpy_from_user_nofault\n"
+     "#define strncpy_from_user_nofault(dst, src, count) strncpy_from_unsafe_user(dst, src, count)\n"
+     "#endif\n"
+     "#ifndef untagged_addr\n"
+     "#define untagged_addr(addr) (addr)\n"
+     "#endif\n"
+     "#endif\n"),
+]
+for _rel, _mark, _code in SHIMS:
+    if _insert_before_guard_end(_rel, _mark, _code):
+        patched.append(f"{_rel}: 4.19 缺失 API shim ({_mark})")
+
+# 41b) allowlist.c 用 put_task_struct (4.19 为 sched/task.h 的 static inline)
+#      以及 strscpy_pad (shim 在 string.h), 两者都要显式 include 才拿得到
+p = pathlib.Path("drivers/kernelsu/policy/allowlist.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    changed = False
+    if "put_task_struct" in t and "linux/sched/task.h" not in t:
+        t = t.replace("#include <linux/kthread.h>",
+                      "#include <linux/kthread.h>\n#include <linux/sched/task.h>", 1)
+        if "linux/sched/task.h" not in t:
+            t = t.replace("#include <linux/rcupdate.h>",
+                          "#include <linux/sched/task.h>\n#include <linux/rcupdate.h>", 1)
+        changed = True
+    if "strscpy_pad" in t and "linux/string.h" not in t:
+        t = t.replace("#include <linux/types.h>",
+                      "#include <linux/string.h>\n#include <linux/types.h>", 1)
+        changed = True
+    if changed:
+        p.write_text(t)
+        patched.append("drivers/kernelsu/policy/allowlist.c: 补 include sched/task.h + string.h")
+
+# 41c) security_inode_init_security_anon 是 5.13 引入, 4.19 直接跳过 anon inode 的 SELinux 初始化
+p = pathlib.Path("drivers/kernelsu/infra/file_wrapper.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    anchor = "    error = security_inode_init_security_anon(inode, &qname, context_inode);"
+    if anchor in t and "OPLUS_419_NO_ANON_SECCTX" not in t:
+        repl = ("#ifdef OPLUS_419_NO_ANON_SECCTX\n"
+                "    /* 4.19: security_inode_init_security_anon 为 5.13 引入, 跳过 anon inode 的 SELinux 初始化 */\n"
+                "    error = 0;\n"
+                "    (void)qname;\n"
+                "#else\n"
+                + anchor + "\n"
+                "#endif")
+        t = t.replace(anchor, repl, 1)
+        # 在文件靠前处定义开关, 让上面的 #ifndef/#else 逻辑成立
+        t = t.replace("#include <linux/version.h>",
+                      "#include <linux/version.h>\n\n"
+                      "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 13, 0)\n"
+                      "#define OPLUS_419_NO_ANON_SECCTX 1\n"
+                      "#endif", 1)
+        p.write_text(t)
+        patched.append("drivers/kernelsu/infra/file_wrapper.c: security_inode_init_security_anon (5.13) 加版本守卫")
+
+# 41d) bigshot 树自身缺口: healthinfo/ion.h 声明了 ion_total_size / ion_total(), 树内无实现
+p = pathlib.Path("drivers/staging/android/ion/ion.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "OPLUS_419_ION_TOTAL_IMPL" not in t:
+        t += ("\n/* OPLUS 4.19 COMPAT: include/linux/healthinfo/ion.h 声明了这两个符号,\n"
+              " * 但 bigshot 树里只有引用没有实现, fs/proc/meminfo.c 会因此链接失败 */\n"
+              "#define OPLUS_419_ION_TOTAL_IMPL 1\n"
+              "atomic_long_t ion_total_size = ATOMIC_LONG_INIT(0);\n"
+              "unsigned long ion_total(void)\n"
+              "{\n"
+              "\treturn (unsigned long)atomic_long_read(&ion_total_size);\n"
+              "}\n")
+        p.write_text(t)
+        patched.append("drivers/staging/android/ion/ion.c: 补 ion_total_size / ion_total() 定义")
+
+# 41e) fs/proc/meminfo.c 引用 ion_total 未 include 声明头
+p = pathlib.Path("fs/proc/meminfo.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "ion_total" in t and "healthinfo/ion.h" not in t:
+        t = t.replace("#include <linux/swap.h>",
+                      "#include <linux/swap.h>\n#include <linux/healthinfo/ion.h>", 1)
+        p.write_text(t)
+        patched.append("fs/proc/meminfo.c: 补 include <linux/healthinfo/ion.h>")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
