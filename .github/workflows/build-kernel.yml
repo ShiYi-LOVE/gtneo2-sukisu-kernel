@@ -43,8 +43,11 @@ jobs:
         env:
           SKIP_SU: ${{ github.event.inputs.skip_su || '0' }}
         run: |
+          # 防 CRLF: 曾经有一次经 API 提交把 build.sh 的行尾改成 CRLF,
+          # shebang 变成 '#!/usr/bin/env bash\r', 直接 exit 127。
+          sed -i 's/\r$//' build.sh
           chmod +x build.sh
-          ./build.sh "${{ matrix.defconfig }}" "${{ matrix.tag }}"
+          bash ./build.sh "${{ matrix.defconfig }}" "${{ matrix.tag }}"
 
       - name: Upload AK3 flashable zip + Image
         uses: actions/upload-artifact@v4
