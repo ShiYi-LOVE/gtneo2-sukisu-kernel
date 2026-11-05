@@ -828,6 +828,79 @@ if sc.exists():
             sc.write_text(t)
             patched.append("drivers/kernelsu/infra/seccomp_cache.c: 4.19 退化为空操作")
 
+# 38) include/uapi/linux/mount.h: SukiSU 的 infra/su_mount_ns.c 写
+#     #include <uapi/linux/mount.h>, 这个 uapi 头是 5.x 才从 uapi/linux/fs.h
+#     拆出来的, 4.19 根本没有 (已核实 404)。
+#     报错: fatal error: 'uapi/linux/mount.h' file not found
+#     4.19 里 MS_PRIVATE/MS_REC 等挂载标志仍在 uapi/linux/fs.h,
+#     CLONE_NEWNS 在 uapi/linux/sched.h -> 建转发头。
+um = pathlib.Path("include/uapi/linux/mount.h")
+if not um.exists():
+    um.parent.mkdir(parents=True, exist_ok=True)
+    um.write_text(
+        "/* OPLUS_419_UAPI_MOUNT: 4.19 无 uapi/linux/mount.h (5.x 才拆出);\n"
+        " * 挂载标志 MS_* 在 4.19 的 uapi/linux/fs.h, CLONE_NEWNS 在 uapi/linux/sched.h */\n"
+        "#ifndef _UAPI_LINUX_MOUNT_H\n"
+        "#define _UAPI_LINUX_MOUNT_H\n"
+        "#include <uapi/linux/types.h>\n"
+        "#include <uapi/linux/fs.h>\n"
+        "#include <uapi/linux/sched.h>\n"
+        "#endif\n"
+    )
+    patched.append("include/uapi/linux/mount.h: 转发头 -> uapi/linux/fs.h + sched.h (4.19)")
+
+# 39) drivers/kernelsu/infra/su_mount_ns.c: 用了 path_mount(dev, struct path*,
+#     type, flags, data) —— 这是 5.9 才有的 API。4.19 的 fs/namespace.c 只有
+#     do_mount(const char *dev, const char __user *dir, const char *type,
+#              unsigned long flags, void *data), 且未 EXPORT (KSU 编进内核,
+#     不受导出限制)。
+#     -> 用 d_path + set_fs(KERNEL_DS) 把 path 转成字符串后调 do_mount。
+smn = pathlib.Path("drivers/kernelsu/infra/su_mount_ns.c")
+if smn.exists():
+    t = smn.read_text(errors="ignore")
+    if "OPLUS_419_COMPAT_PATH_MOUNT" not in t:
+        old = ("extern int path_mount(const char *dev_name, struct path *path, const char *type_page, unsigned long flags,\n"
+               "                      void *data_page);\n")
+        new = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n"
+               "extern int path_mount(const char *dev_name, struct path *path, const char *type_page, unsigned long flags,\n"
+               "                      void *data_page);\n"
+               "#else\n"
+               "/* OPLUS_419_COMPAT_PATH_MOUNT: 4.19 无 path_mount(), 只有 do_mount()\n"
+               " * (第二参是 __user 路径字符串), 故把 struct path 转成绝对路径再调 */\n"
+               "#include <linux/dcache.h>\n"
+               "#include <asm/uaccess.h>\n"
+               "extern long do_mount(const char *dev_name, const char __user *dir_name,\n"
+               "                     const char *type_page, unsigned long flags, void *data_page);\n"
+               "static int ksu_do_path_mount(const char *dev_name, struct path *path, const char *type_page,\n"
+               "                             unsigned long flags, void *data_page)\n"
+               "{\n"
+               "    int err;\n"
+               "    char *page = (char *)__get_free_page(GFP_KERNEL);\n"
+               "    char *name;\n"
+               "    mm_segment_t old_fs;\n"
+               "\n"
+               "    if (!page)\n"
+               "        return -ENOMEM;\n"
+               "    name = d_path(path, page, PAGE_SIZE);\n"
+               "    if (IS_ERR(name)) {\n"
+               "        err = PTR_ERR(name);\n"
+               "        free_page((unsigned long)page);\n"
+               "        return err;\n"
+               "    }\n"
+               "    old_fs = get_fs();\n"
+               "    set_fs(KERNEL_DS);\n"
+               "    err = do_mount(dev_name, name, type_page, flags, data_page);\n"
+               "    set_fs(old_fs);\n"
+               "    free_page((unsigned long)page);\n"
+               "    return err;\n"
+               "}\n"
+               "#define path_mount ksu_do_path_mount\n"
+               "#endif\n")
+        if old in t:
+            t = t.replace(old, new, 1)
+            smn.write_text(t)
+            patched.append("drivers/kernelsu/infra/su_mount_ns.c: path_mount -> do_mount 兼容 (5.9+)")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
