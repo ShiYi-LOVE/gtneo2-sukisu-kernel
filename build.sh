@@ -428,11 +428,16 @@ echo "==> [5b] SukiSU 子树快速预检 (只编 drivers/kernelsu, -k 一次暴�
 # drivers/kernelsu 是唯一反复重建的子树, 单独用 -k 编一遍只需 1~2 分钟,
 # 而且能把该子树里所有编译错误一次性打出来, 不必每轮等 15 分钟。
 set +e
+# 先编 security/selinux: 它会在编译过程中生成 security/selinux/flask.h 等头文件,
+# kernelsu 里 include 的 objsec.h/security.h 都依赖它。全量编译时顺序天然满足,
+# 单独编子树时 flask.h 还不存在 → r49 预检里刷了一片假的 'flask.h not found'。
+make "${BUILD_FLAGS[@]}" -j"$JOBS" security/selinux/ > /tmp/sel_pre.log 2>&1
+SEL_RC=$?
 make "${BUILD_FLAGS[@]}" -j"$JOBS" -k drivers/kernelsu/ > /tmp/ksu_pre.log 2>&1
 KSU_PRE_RC=$?
 set -e
+echo "  预检结果: selinux exit=$SEL_RC(仅用于生成 flask.h), kernelsu exit=$KSU_PRE_RC"
 KSU_ERR=$(grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | wc -l)
-echo "  预检结果: exit=$KSU_PRE_RC, 错误行=$KSU_ERR"
 if [ "$KSU_ERR" -gt 0 ]; then
   echo "!! drivers/kernelsu 存在编译错误, 完整清单:"
   grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | sed 's/^/    /' | head -40

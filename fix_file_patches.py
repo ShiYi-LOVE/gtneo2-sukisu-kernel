@@ -1289,6 +1289,43 @@ if p.exists():
         p.write_text(t)
         patched.append("drivers/kernelsu/extension/cpu_spoof.c: clocksource->vdso_clock_mode (5.2) 加版本守卫")
 
+# 45) linux/minmax.h (5.10 才从 kernel.h 拆出来) + dispatch.c 缺 sched/task.h
+#     r49 预检一次性暴露的两类:
+#       sulog/event.c:5        fatal error: 'linux/minmax.h' file not found
+#       supercall/dispatch.c   tasklist_lock / init_task 未声明
+#     实测 bigshot 4.19: include/linux/sched/task.h:22 `extern rwlock_t tasklist_lock;`
+#                        include/linux/sched/task.h:26 `extern struct task_struct init_task;`
+#     而 min/max 宏在 4.19 由 include/linux/kernel.h 提供, 建个转发头即可
+p = pathlib.Path("include/linux/minmax.h")
+if not p.exists():
+    p.write_text("/* OPLUS 4.19 COMPAT: linux/minmax.h 是 5.10 从 linux/kernel.h 拆出来的,\n"
+                 " * 4.19 的 min()/max()/clamp() 等宏都还在 kernel.h 里, 这里做纯转发。\n"
+                 " * (kernel.h 在本树里不反向 include 本文件, 不存在循环) */\n"
+                 "#ifndef _LINUX_MINMAX_H\n"
+                 "#define _LINUX_MINMAX_H\n"
+                 "\n"
+                 "#include <linux/kernel.h>\n"
+                 "\n"
+                 "#endif /* _LINUX_MINMAX_H */\n")
+    patched.append("include/linux/minmax.h: 新建转发头 -> linux/kernel.h (5.10 才拆出)")
+
+p = pathlib.Path("drivers/kernelsu/supercall/dispatch.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "linux/sched/task.h" not in t:
+        done = False
+        for anchor in ("#include <linux/sched/signal.h>",
+                       "#include <linux/sched.h>",
+                       "#include <linux/thread_info.h>"):
+            if anchor in t:
+                t = t.replace(anchor, anchor + "\n#include <linux/sched/task.h>", 1)
+                done = True
+                break
+        if done:
+            p.write_text(t)
+            patched.append("drivers/kernelsu/supercall/dispatch.c: 补 include linux/sched/task.h "
+                           "(tasklist_lock / init_task 的声明处)")
+
 # 41e) fs/proc/meminfo.c 引用 ion_total 未 include 声明头
 p = pathlib.Path("fs/proc/meminfo.c")
 if p.exists():
