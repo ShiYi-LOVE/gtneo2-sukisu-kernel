@@ -38,6 +38,15 @@ ZIP = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "fs_vendor.zip")
 
 TARGETS = ("fs/oext4", "fs/erofs", "fs/exfat")
 
+# r42: 换成 Blackmanx/kernel_realme_sm8250 (bigshot) 底座后, 这三个目录本来就是
+# 真实源码 (oext4 46 文件 / erofs 21 / exfat 25), 不需要再从 zip 覆盖。
+# 只要 fs/oext4/Kconfig 里已有 config EXT4_FS 就直接跳过, 避免无谓改写。
+_pre = ROOT / "fs/oext4/Kconfig"
+if _pre.is_file() and "config EXT4_FS" in _pre.read_text(errors="ignore"):
+    print("   本底座已自带 fs/oext4|erofs|exfat 完整源码, 跳过覆盖")
+    print("fs_restore done (skipped)")
+    sys.exit(0)
+
 if not ZIP.is_file():
     print("FATAL: 找不到源码包 %s" % ZIP)
     sys.exit(1)
