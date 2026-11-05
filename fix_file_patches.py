@@ -41,16 +41,39 @@ if p.exists():
         p.write_text(new)
         patched.append(f"kernel/printk/printk.c: removed {n} vendor uart-skip block(s)")
 
-# 3) mm/vmscan.c: OPLUS_FEATURE_PROCESS_RECLAIM 守卫的 is_reclaim_should_cancel
-#    闭源未发布 —— 宏已在白名单中删除, 这里双保险确认调用块条件失效
-p = pathlib.Path("mm/vmscan.c")
-if p.exists():
-    t = p.read_text(errors="ignore")
-    old = "#if defined(OPLUS_FEATURE_PROCESS_RECLAIM) && defined(CONFIG_PROCESS_RECLAIM_ENHANCE)"
-    if old in t:
-        t = t.replace(old, "#if 0 /* OPLUS_FEATURE_PROCESS_RECLAIM removed: closed-source impl */")
-        p.write_text(t)
-        patched.append("mm/vmscan.c: PROCESS_RECLAIM call-site disabled")
+# 3) mm/vmscan.c: 调用 is_reclaim_should_cancel() —— 官方树里该符号闭源未发布。
+# !! r44 教训: 原实现把 `#if defined(OPLUS_FEATURE_PROCESS_RECLAIM) && defined(CONFIG_PROCESS_RECLAIM_ENHANCE)`
+#    整串替换成 `#if 0`。这串条件在 vmscan.c 里出现 3 次(函数签名分支 / .walk 初始化 / 调用点),
+#    str.replace 全部命中 -> 函数定义退化成 2 参数, 而 include/linux/rmap.h 里同条件仍是
+#    3 参数声明 -> "conflicting types for 'reclaim_pages_from_list'"。
+#    改法: 只在符号确实没有定义时才砍掉"调用点"两行, 绝不碰条件表达式本身。
+vp = pathlib.Path("mm/vmscan.c")
+if vp.exists():
+    vt = vp.read_text(errors="ignore")
+    if "is_reclaim_should_cancel" in vt:
+        defined_elsewhere = False
+        for d in ("mm", "include", "kernel", "drivers"):
+            if defined_elsewhere or not pathlib.Path(d).exists():
+                continue
+            for f in pathlib.Path(d).rglob("*.[ch]"):
+                if f.as_posix() == "mm/vmscan.c":
+                    continue
+                try:
+                    if "is_reclaim_should_cancel" in f.read_text(errors="ignore"):
+                        defined_elsewhere = True
+                        break
+                except OSError:
+                    continue
+        if defined_elsewhere:
+            patched.append("mm/vmscan.c: is_reclaim_should_cancel 本树已有定义, 保留原调用")
+        else:
+            nv, n = re.subn(
+                r"[ \t]*if \(sc->walk && is_reclaim_should_cancel\(sc->walk\)\)\s*\n\s*break;",
+                "/* is_reclaim_should_cancel: closed-source impl, call removed */",
+                vt)
+            if n:
+                vp.write_text(nv)
+                patched.append(f"mm/vmscan.c: removed {n} is_reclaim_should_cancel call-site(s) only")
 
 # 4) fs/proc/meminfo.c: 无条件 include <linux/healthinfo/ion.h> (官方守卫被注释掉),
 #    healthinfo 实现整体闭源未发布 —— 注释掉该 include, ION 统计行随
@@ -65,17 +88,26 @@ for meminfo in ("fs/proc/meminfo.c",):
             p.write_text(t)
             patched.append(f"{meminfo}: commented out unconditional healthinfo/ion.h include")
 
-# 5) kernel/sched/cputime.c: account_task_time 调用点守卫 OPLUS_FEATURE_TASK_CPUSTATS,
-#    其实现 fs/proc/task_cpustats 闭源未发布 (defconfig 中 #ifdef 包 CONFIG 行无效,
-#    CONFIG_OPLUS_CTP/SCHED 实际未开启) —— 宏已在白名单删除, 此处兜底禁用守卫
+# 5) kernel/sched/cputime.c: ctp_send_message / sched_action_trig 来自闭源的
+#    fs/proc/task_cpustats (其 include/linux/task_cpustats.h 两套树都没有)。
+#    守卫有两种写法, 都要覆盖 (r44 教训: 只处理了 #ifdef 形式, 漏了复合形式,
+#    结果 cputime.c:533 的 `#if defined(OPLUS_FEATURE_TASK_CPUSTATS) && defined(CONFIG_OPLUS_SCHED)`
+#    仍然成立, 报 use of undeclared identifier 'ctp_send_message')
+CPUTIME_GUARDS = (
+    ("#ifdef OPLUS_FEATURE_TASK_CPUSTATS",
+     "#if 0 /* OPLUS_FEATURE_TASK_CPUSTATS removed: closed-source impl */"),
+    ("#if defined(OPLUS_FEATURE_TASK_CPUSTATS) && defined(CONFIG_OPLUS_SCHED)",
+     "#if 0 /* TASK_CPUSTATS && OPLUS_SCHED removed: ctp_send_message is closed-source */"),
+)
 p = pathlib.Path("kernel/sched/cputime.c")
 if p.exists():
     t = p.read_text(errors="ignore")
-    if "#ifdef OPLUS_FEATURE_TASK_CPUSTATS" in t:
-        t = t.replace("#ifdef OPLUS_FEATURE_TASK_CPUSTATS",
-                      "#if 0 /* OPLUS_FEATURE_TASK_CPUSTATS removed: closed-source impl */")
+    orig = t
+    for old, new in CPUTIME_GUARDS:
+        t = t.replace(old, new)
+    if t != orig:
         p.write_text(t)
-        patched.append("kernel/sched/cputime.c: TASK_CPUSTATS call-sites disabled")
+        patched.append("kernel/sched/cputime.c: TASK_CPUSTATS call-sites disabled (both guard forms)")
 
 # 6) 全树兜底: 注释掉对「真的不存在」的闭源头文件的无条件 include
 #    (healthinfo/*, task_cpustats.h)
