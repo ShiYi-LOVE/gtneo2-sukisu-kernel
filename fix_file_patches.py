@@ -1082,14 +1082,15 @@ def _insert_before_guard_end(rel_path, marker, code_block, probe=None):
 
 SHIMS = [
     # (头文件, 自身标记, 已存在探测串, 代码): 探测串命中说明这棵树本来就有, 跳过
-    ("include/linux/compiler.h", "OPLUS_419_FALLTHROUGH", "#define fallthrough",
-     "/* OPLUS 4.19 COMPAT: fallthrough 语句为 5.4 引入, 此处退化为空语句 */\n"
-     "#ifndef OPLUS_419_FALLTHROUGH\n"
-     "#define OPLUS_419_FALLTHROUGH\n"
-     "#ifndef fallthrough\n"
-     "#define fallthrough do { } while (0)\n"
-     "#endif\n"
-     "#endif\n"),
+    #
+    # !! fallthrough 绝不能做全局宏 (r47 教训) !!
+    # 原本在 include/linux/compiler.h 里 #define fallthrough do { } while (0),
+    # 结果 net/sctp/sm_make_chunk.c 把 fallthrough 当**标号**用:
+    #     goto fallthrough;  /  fallthrough:
+    # 宏一展开就变成 goto do { } while (0);  ->  "expected identifier"
+    #                                        /  "expected ';' after do/while statement"
+    # 4.19 全树扫描后确认: 只有 drivers/kernelsu 内部把它当语句提示用,
+    # 所以改成在第 42 步只删 kernelsu 里的 token, 不污染全树。
     ("include/linux/string.h", "OPLUS_419_STRSCPY_PAD", "strscpy_pad(",
      "/* OPLUS 4.19 COMPAT: strscpy_pad 为 5.1 引入 */\n"
      "#ifndef OPLUS_419_STRSCPY_PAD\n"
@@ -1197,6 +1198,73 @@ if p.exists():
               "}\n")
         p.write_text(t)
         patched.append("drivers/staging/android/ion/ion.c: 补 ion_total_size / ion_total() 定义")
+
+# 42) fallthrough 语句 (5.4 引入) —— 只删 kernelsu 里的 token, 不做全局宏
+#     (见上面 SHIMS 处 r47 教训: net/sctp/sm_make_chunk.c 把它当标号, 全局宏直接炸)
+#     该语句在 4.19 上纯属 "抑制 -Wimplicit-fallthrough 告警" 的提示, 删掉不影响语义
+_ft = 0
+for _p in pathlib.Path("drivers/kernelsu").rglob("*"):
+    if _p.suffix not in (".c", ".h"):
+        continue
+    _t = _p.read_text(errors="ignore")
+    _nt = re.sub(r"(?m)^([ \t]*)fallthrough;[ \t]*$",
+                 r"\1/* fallthrough: 4.19 无此语句, 已移除 */", _t)
+    if _nt != _t:
+        _p.write_text(_nt)
+        _ft += 1
+if _ft:
+    patched.append(f"drivers/kernelsu: 移除 {_ft} 个文件的 fallthrough 语句 (避免与 sctp 标号冲突)")
+
+# 43) app_profile.c: 4.19 的 struct seccomp 没有 filter_count, 也没有 seccomp_filter_release
+#     本树实测 (include/linux/seccomp.h:28-31):
+#         struct seccomp { int mode; struct seccomp_filter *filter; };
+#     filter_count 为 v5.0 引入, seccomp_filter_release 为 v5.9 引入;
+#     4.19 的等价释放接口是 extern void put_seccomp_filter(struct task_struct *tsk)
+#     (kernel/seccomp.c 里做 __put_seccomp_filter(tsk->seccomp.filter)), 语义正好是
+#     "把 tsk 当前 filter 的引用计数减一", 与 seccomp_filter_release 的释放部分等价。
+p = pathlib.Path("drivers/kernelsu/policy/app_profile.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "OPLUS_419_SECCOMP" not in t:
+        # 43a) filter_count (v5.0)
+        old_a = ("    current->seccomp.mode = 0;\n"
+                 "    current->seccomp.filter = NULL;\n"
+                 "    atomic_set(&current->seccomp.filter_count, 0);\n")
+        new_a = ("    current->seccomp.mode = 0;\n"
+                 "    current->seccomp.filter = NULL;\n"
+                 "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\n"
+                 "    atomic_set(&current->seccomp.filter_count, 0);\n"
+                 "#endif\n")
+        ok_a = old_a in t
+        if ok_a:
+            t = t.replace(old_a, new_a, 1)
+
+        # 43b) 释放路径 (v5.9): 整块替换为 4.19 的 put_seccomp_filter()
+        old_b = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)\n"
+                 "    // https://github.com/torvalds/linux/commit/bfafe5efa9754ebc991750da0bcca2a6694f3ed3")
+        idx = t.find(old_b)
+        end_marker = "    seccomp_filter_release(fake);\n    kfree(fake);"
+        idx_end = t.find(end_marker)
+        ok_b = idx >= 0 and idx_end > idx
+        if ok_b:
+            block = t[idx:idx_end]
+            t = (t[:idx]
+                 + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n"
+                 + block
+                 + "    seccomp_filter_release(fake);\n"
+                 + "#else\n"
+                 + "    /* OPLUS_419_SECCOMP: 4.19 无 seccomp_filter_release, 用等价接口释放\n"
+                 + "     * fake 携带的 filter 引用 (前面 memcpy 自 current, filter 已被置空) */\n"
+                 + "    put_seccomp_filter(fake);\n"
+                 + "#endif\n"
+                 + t[idx_end + len("    seccomp_filter_release(fake);\n"):])
+        if ok_a or ok_b:
+            t = t.replace("#include <linux/seccomp.h>",
+                          "#include <linux/seccomp.h>\n"
+                          "/* OPLUS_419_SECCOMP: 4.19 struct seccomp 无 filter_count, 无 seccomp_filter_release */", 1)
+            p.write_text(t)
+            patched.append("drivers/kernelsu/policy/app_profile.c: seccomp filter_count (5.0) / "
+                           "seccomp_filter_release (5.9) 加 4.19 等价实现")
 
 # 41e) fs/proc/meminfo.c 引用 ion_total 未 include 声明头
 p = pathlib.Path("fs/proc/meminfo.c")
