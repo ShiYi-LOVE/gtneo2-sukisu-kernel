@@ -214,7 +214,7 @@ cd kernel
 # Oplus Makefile 用 Python2 语法写的 gcc-wrapper.py 包裹编译器，新系统无 python2 会直接报错
 # 摘掉包装，保留其内部 REAL_CC 逻辑
 sed -i 's|$(PYTHON) $(srctree)/scripts/gcc-wrapper.py ||' Makefile
-grep -n "^CC" Makefile | head -3
+grep -n "^CC" Makefile 2>/dev/null | head -3 || true
 
 # OplusKernelEnvConfig.mk 白名单宏会激活引用闭源头文件的核心代码:
 #   - SCHED_ASSIST -> mutex.h 闭源调度
@@ -410,7 +410,7 @@ echo "==> [4b] 全局移除 -Werror (Oplus 源码按 GCC 旧告警标准编写, 
 #        显式 -Werror=xxx 不受 KCFLAGS -Wno-error 影响, 必须从 Makefile 源头剥离)..."
 grep -rlZ --include='Makefile' --include='Makefile.*' --include='Kbuild*' -e '-Werror' . 2>/dev/null \
   | xargs -0 -r sed -i 's/-Werror[=-][a-zA-Z0-9_=.-]*//g; s/-Werror//g'
-echo "  -Werror stripped from $(grep -rl --include='Makefile*' --include='Kbuild*' -e '-Werror' . 2>/dev/null | wc -l) remaining files"
+echo "  -Werror stripped from $( (grep -rl --include='Makefile*' --include='Kbuild*' -e '-Werror' . 2>/dev/null || true) | wc -l) remaining files"
 
 echo "==> [5/7] 配置内核: $DEFCONFIG..."
 configure_kernel
@@ -437,10 +437,13 @@ make "${BUILD_FLAGS[@]}" -j"$JOBS" -k drivers/kernelsu/ > /tmp/ksu_pre.log 2>&1
 KSU_PRE_RC=$?
 set -e
 echo "  预检结果: selinux exit=$SEL_RC(仅用于生成 flask.h), kernelsu exit=$KSU_PRE_RC"
-KSU_ERR=$(grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | wc -l)
+# 注意: 本脚本是 set -euo pipefail。grep 无匹配时退出码 1, 经 pipefail 会传染整条
+# 流水线 → 一次"零错误"的成功预检反而让脚本 exit 1 (r52 就这么被误判成失败)。
+# 必须用 ( ... || true ) 把中间的 grep 归一化。
+KSU_ERR=$( (grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror || true) | wc -l )
 if [ "$KSU_ERR" -gt 0 ]; then
   echo "!! drivers/kernelsu 存在编译错误, 完整清单:"
-  grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | sed 's/^/    /' | head -40
+  (grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | sed 's/^/    /' | head -40) || true
   echo "FATAL: 先修完上面这些再进全量编译 (不浪费 15 分钟)"
   exit 1
 fi
