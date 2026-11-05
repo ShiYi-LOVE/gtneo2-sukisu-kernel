@@ -901,6 +901,78 @@ if smn.exists():
             smn.write_text(t)
             patched.append("drivers/kernelsu/infra/su_mount_ns.c: path_mount -> do_mount 兼容 (5.9+)")
 
+# 40) drivers/kernelsu/manager/pkg_observer.c: 应用安装监听 (fsnotify) 用的是
+#     5.9 才引入的 fsnotify_ops.handle_inode_event, 回调语义与参数完全不同:
+#       5.x : int (*handle_inode_event)(struct fsnotify_mark *, u32, inode, dir, qstr *, u32)
+#       4.19: int (*handle_event)(struct fsnotify_group *, inode, u32, data, data_type,
+#                                 const unsigned char *file_name, u32, iter_info)
+#     另外 4.19 没有 5.9 的 FS_MOVE 别名 (只有 FS_MOVED_FROM/FS_MOVED_TO)。
+#     做法: 补 FS_MOVE 别名 + 按 4.19 签名移植回调 (文件名优先取 file_name,
+#     否则从 data 的 struct path->dentry->d_name 取)。匹配到 packages.list
+#     就触发一次已安装应用重扫; 漏触发只是延迟刷新, 不影响 root 功能。
+pkg = pathlib.Path("drivers/kernelsu/manager/pkg_observer.c")
+if pkg.exists():
+    t = pkg.read_text(errors="ignore")
+    if "OPLUS_419_COMPAT_FSNOTIFY" not in t:
+        # (a) FS_MOVE 别名 (MASK_SYSTEM 在文件开头就要用)
+        anchor_a = ("// Older kernels use a boolean task_work notification argument.\n"
+                    "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) && !defined(TWA_RESUME)\n"
+                    "#define TWA_RESUME true\n"
+                    "#endif\n")
+        add_a = ("\n/* OPLUS_419_COMPAT_FSNOTIFY: 4.19 只有 FS_MOVED_FROM/FS_MOVED_TO,\n"
+                 " * 没有 5.9 引入的 FS_MOVE 组合别名 */\n"
+                 "#ifndef FS_MOVE\n"
+                 "#define FS_MOVE (FS_MOVED_FROM | FS_MOVED_TO)\n"
+                 "#endif\n")
+        if anchor_a in t:
+            t = t.replace(anchor_a, anchor_a + add_a, 1)
+        # (b) fsnotify_ops 按版本分流
+        anchor_b = ("static const struct fsnotify_ops ksu_ops = {\n"
+                    "    .handle_inode_event = ksu_handle_inode_event,\n"
+                    "};\n")
+        new_b = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)\n"
+                 "static const struct fsnotify_ops ksu_ops = {\n"
+                 "    .handle_inode_event = ksu_handle_inode_event,\n"
+                 "};\n"
+                 "#else\n"
+                 "/* OPLUS_419_COMPAT_FSNOTIFY: 4.19 的 fsnotify_ops 只有 handle_event,\n"
+                 " * 把 5.x 的 handle_inode_event 语义等价移植过来 */\n"
+                 "static int ksu_handle_event_419(struct fsnotify_group *group, struct inode *inode, u32 mask,\n"
+                 "                                const void *data, int data_type, const unsigned char *file_name,\n"
+                 "                                u32 cookie, struct fsnotify_iter_info *iter_info)\n"
+                 "{\n"
+                 "    const unsigned char *name = file_name;\n"
+                 "\n"
+                 "    (void)group;\n"
+                 "    (void)inode;\n"
+                 "    (void)cookie;\n"
+                 "    (void)iter_info;\n"
+                 "\n"
+                 "    if (!name && data_type == FSNOTIFY_EVENT_PATH && data) {\n"
+                 "        struct path *p = (struct path *)data;\n"
+                 "        if (p->dentry)\n"
+                 "            name = (const unsigned char *)p->dentry->d_name.name;\n"
+                 "    }\n"
+                 "    if (!name)\n"
+                 "        return 0;\n"
+                 "    if (mask & FS_ISDIR)\n"
+                 "        return 0;\n"
+                 "    if (!memcmp(name, \"packages.list\", 13) && name[13] == '\\0') {\n"
+                 "        pr_info(\"packages.list detected (4.19 compat): %d\\n\", mask);\n"
+                 "        ksu_defer_track_throne();\n"
+                 "    }\n"
+                 "    return 0;\n"
+                 "}\n"
+                 "\n"
+                 "static const struct fsnotify_ops ksu_ops = {\n"
+                 "    .handle_event = ksu_handle_event_419,\n"
+                 "};\n"
+                 "#endif\n")
+        if anchor_b in t:
+            t = t.replace(anchor_b, new_b, 1)
+        pkg.write_text(t)
+        patched.append("drivers/kernelsu/manager/pkg_observer.c: fsnotify handle_event 移植 + FS_MOVE 别名")
+
 for line in patched:
     print(f"  patched: {line}")
 print("file patches done")
