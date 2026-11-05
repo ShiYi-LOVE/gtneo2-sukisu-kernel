@@ -107,6 +107,13 @@ configure_kernel() {
   # oplus_invoke_syscall/oplus_exec_block/oplus_mount_block 闭源未发布,
   # 关闭后走各调用点 #else 的 stock CAF 路径
   ./scripts/config --file out/.config -d OPLUS_SECURE_GUARD || true
+  # OPLUS_UX_IM_FLAG (给 IM/即时通讯线程打 UX 标记的 proc 节点): 其代码
+  # (kernel/sched_assist/sched_assist_common.c 的 im_flag_set_handle 等) 直接读写
+  # task->ux_im_flag, 而 include/linux/sched.h 里根本没有这个字段 —— 官方树的
+  # sched.h 也没有(两边都是 2407 行, 同样缺), 说明这是 bigshot 那份 5.4 代码搬进
+  # 4.19 时留下的洞。原厂配置把它打开了, 于是 6 处引用全部编译失败。
+  # 关掉后整块 #ifdef CONFIG_OPLUS_UX_IM_FLAG 编译跳过, 只失去一个 IM 线程标记节点。
+  ./scripts/config --file out/.config -d OPLUS_UX_IM_FLAG || true
   # === MODVERSIONS 关闭 + vermagic 强制带 modversions (r33) ===
   # 矛盾点: 原厂模块 vermagic 含 "modversions", 内核不带该标志则全部模块被拒载;
   # 但开启 MODVERSIONS 会触发官方源码缺陷:
