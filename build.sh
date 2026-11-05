@@ -22,6 +22,26 @@ KERNEL_URL="https://github.com/Blackmanx/kernel_realme_sm8250"
 KERNEL_BRANCH="bigshot"
 SUSFS_URL="https://gitlab.com/simonpunk/susfs4ksu"
 
+# === 底座类型开关 (r44 核心) ===
+# 两套底座对补丁的需求完全相反, 必须分流, 否则会互相破坏:
+#
+# official (realme 官方树): 大量目录是指向未开源 vendor/oplus/kernel_4.19 的失效符号链接。
+#   必须"删宏/改名/补源码/注释 include", 让引用闭源实现的代码整体编译跳过。
+#
+# community (bigshot 这类完整化树): 所有实现都是真实源码, 而那些 OPLUS_FEATURE_* 宏
+#   是"承重"的 —— 它们不只控制代码开关, 还改结构体布局:
+#     include/linux/sched.h:1573  #ifdef OPLUS_FEATURE_SCHED_ASSIST
+#                                     int ux_state;   <-- 宏被删, struct task_struct 就少字段
+#   而 kernel/sched_assist/ 又是 obj-y 无条件编译。删宏的直接后果:
+#     sched_assist_common.h:264: error: no member named 'ux_state' in 'struct task_struct'
+#   即使侥幸编过, 原厂 vendor 模块按官方布局访问 task_struct 也会错位 —— 这正是
+#   刷完卡 logo 的典型成因。所以 community 树一个宏都不许动。
+case "$KERNEL_URL" in
+  *Blackmanx*|*community*) TREE_FLAVOR="community" ;;
+  *)                       TREE_FLAVOR="official"  ;;
+esac
+echo "==> 底座类型: $TREE_FLAVOR ($KERNEL_URL @ $KERNEL_BRANCH)"
+
 export KBUILD_BUILD_USER="SukiSU"
 export KBUILD_BUILD_HOST="gtneo2"
 export KBUILD_BUILD_TIMESTAMP="Thu Jan 1 00:00:00 UTC 2026"
@@ -199,12 +219,15 @@ grep -n "^CC" Makefile | head -3
 # 中和这些宏 = 整个功能编译跳过, 与官方出厂行为一致
 # !! 注意: 必须"改名", 不能"删行" (r42 教训) !!
 # 官方源码树里这些符号只出现在 ALLOWED_MCROS 列表中, 所以 `/符号/d` 删行没问题;
-# 但 bigshot 等第三方树里同一个符号还出现在 `ifeq ($(OPLUS_FEATURE_X),yes)` 判断里,
+# 但第三方树里同一个符号还出现在 `ifeq ($(OPLUS_FEATURE_X),yes)` 判断里,
 # 删行会把 ifeq 行一起删掉, 只剩下面的 endif -> make 直接报
 #   OplusKernelEnvConfig.mk:208: *** extraneous 'endif'.  Stop.
 # 改名方案对两种出现位置都安全, 且逐行结构完全不变:
 #   列表项   -> 生成 -DOPLUS_DISABLED_xxx (无人引用, 无害)
 #   ifeq 判断 -> 变量永未定义, 条件恒假, 整块跳过
+#
+# !! 但 community 树一律不许动 (r43 教训) !! 那套树里宏是承重的, 见上面 TREE_FLAVOR 注释
+if [ "$TREE_FLAVOR" = "official" ]; then
 for _m in SCHED_ASSIST MULTI_FREEAREA PROCESS_RECLAIM VIRTUAL_RESERVE_MEMORY TASK_CPUSTATS HEALTHINFO; do
   sed -i "s/OPLUS_FEATURE_${_m}/OPLUS_DISABLED_${_m}/g" OplusKernelEnvConfig.mk
 done
@@ -218,6 +241,10 @@ sed -i -e '/export CONFIG_OPLUS_SECURE_GUARD/d'  -e '/DCONFIG_OPLUS_SECURE_GUARD
        -e '/export CONFIG_OPLUS_MOUNT_BLOCK/d'   -e '/DCONFIG_OPLUS_MOUNT_BLOCK/d' \
        -e '/export CONFIG_OPLUS_EXECVE_BLOCK/d'  -e '/DCONFIG_OPLUS_EXECVE_BLOCK/d' \
        -e '/DCONFIG_OPLUS_EXECVE_REPORT/d' OplusKernelEnvConfig.mk
+echo "OplusKernelEnvConfig.mk: official 树 -> 6 个闭源特性宏已改名中和, SECURE_GUARD/MOUNT_BLOCK/EXECVE 强制注入行已删"
+else
+echo "OplusKernelEnvConfig.mk: community 树 -> 保持原样 (宏改结构体布局, 动了反而炸)"
+fi
 # 结构自检: make 的条件指令一旦不平衡就直接 "extraneous 'endif'", 报错位置飘忽难查,
 # 这里提前拦一道, 让失败信息指向真正的修改脚本而不是 make 的某一行
 python3 - <<'PYCHK' || exit 1
@@ -235,7 +262,6 @@ for i, l in enumerate(lines, 1):
             sys.exit(1)
 print("  OplusKernelEnvConfig.mk 条件块配平 OK (depth=%d)" % depth)
 PYCHK
-echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO renamed->disabled; SECURE_GUARD/MOUNT_BLOCK/EXECVE force-exports removed"
 
 # SKIP_SU=1 时跳过 SukiSU/SusFS, 产出纯净对照内核 (用于定位卡 logo 是否由 rootkit 引起)
 if [ "${SKIP_SU:-0}" = "1" ]; then
@@ -348,10 +374,15 @@ else
 fi
 fi   # 底座自带完整 Oplus 组件时跳过上面整段回填
 
+if [ "$TREE_FLAVOR" = "official" ]; then
 echo "==> [3d] 自动扫描缺失头文件的 include, 删除对应 OPLUS 白名单宏..."
 python3 "$ORIGINAL/fix_oplus_macros.py" || echo "!! 宏清理脚本异常，继续构建"
+else
+# community 树: 头文件与实现都是真实源码, 删宏只会破坏结构体布局 (r43 教训)
+echo "==> [3d] community 树: 跳过宏清理 (所有 OPLUS 特性实现均为真实源码)"
+fi
 
-echo "==> [3d2] 文件级修补 (vmscan/printk 闭源符号缺失 -> 还原 stock 行为)..."
+echo "==> [3d2] 文件级修补 (SukiSU/SusFS 4.19 适配 + 闭源符号兜底)..."
 python3 "$ORIGINAL/fix_file_patches.py" || echo "!! 文件修补脚本异常，继续构建"
 
 echo "==> [4/7] 拉取 Neutron Clang 工具链 (proton-clang 过老，ld 无法链接新 glibc)..."
