@@ -415,13 +415,34 @@ echo "  -Werror stripped from $(grep -rl --include='Makefile*' --include='Kbuild
 echo "==> [5/7] 配置内核: $DEFCONFIG..."
 configure_kernel
 
-echo "==> [6/7] 编译裸 Image (jobs=$JOBS, GNU as —— 4.19 老内核不兼容 LLVM 集成汇编器)..."
 BUILD_FLAGS=(O=out ARCH=arm64 SUBARCH=arm64
   CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
   LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
   # Oplus 源码按 GCC 习惯留有 implicit-int/隐式声明等历史问题 (出厂用 GCC 只告警),
   # Clang -Werror 会全部升级为错误 —— 全局降级, 真正的链接错误仍会正常失败
   KCFLAGS="-Wno-error")
+
+echo "==> [5b] SukiSU 子树快速预检 (只编 drivers/kernelsu, -k 一次暴露全部错误)..."
+# 痛点: 全量编译 15 分钟, 但 make 遇错即停, 每轮只能暴露 1 个错误,
+# 而 4.19 缺的 API/结构体成员是一个一个冒出来的 (已经连修 18 处)。
+# drivers/kernelsu 是唯一反复重建的子树, 单独用 -k 编一遍只需 1~2 分钟,
+# 而且能把该子树里所有编译错误一次性打出来, 不必每轮等 15 分钟。
+set +e
+make "${BUILD_FLAGS[@]}" -j"$JOBS" -k drivers/kernelsu/ > /tmp/ksu_pre.log 2>&1
+KSU_PRE_RC=$?
+set -e
+KSU_ERR=$(grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | wc -l)
+echo "  预检结果: exit=$KSU_PRE_RC, 错误行=$KSU_ERR"
+if [ "$KSU_ERR" -gt 0 ]; then
+  echo "!! drivers/kernelsu 存在编译错误, 完整清单:"
+  grep -E " error: | fatal error: " /tmp/ksu_pre.log | grep -v Werror | sed 's/^/    /' | head -40
+  echo "FATAL: 先修完上面这些再进全量编译 (不浪费 15 分钟)"
+  exit 1
+fi
+echo "  OK: drivers/kernelsu 全部目标编过"
+
+echo "==> [6/7] 编译裸 Image (jobs=$JOBS, GNU as —— 4.19 老内核不兼容 LLVM 集成汇编器)..."
+
 
 # 只编 Image (未压缩). 原厂 boot.img 实测 KERNEL_FMT=raw, 47MB 未压缩且内核尾部
 # 无内嵌 FDT; 设备树走 boot 镜像里独立的 15.8MB dtb 段 (magiskboot 重打包时原样保留)。

@@ -1266,6 +1266,29 @@ if p.exists():
             patched.append("drivers/kernelsu/policy/app_profile.c: seccomp filter_count (5.0) / "
                            "seccomp_filter_release (5.9) 加 4.19 等价实现")
 
+# 44) cpu_spoof.c: struct clocksource 的 vdso_clock_mode 成员是 v5.2 才加的
+#     4.19 (arch/arm64/include/asm/cacheflush.h 那版树, clocksource.h) 没有该字段,
+#     而 vDSO 时钟模式在 4.19 由 arch 层写死为 ARCHTIMER, 根本不需要改写。
+#     上面的 vdso_data[CS_*].clock_mode 改写仍然有效 (4.19 有 vdso_data)。
+p = pathlib.Path("drivers/kernelsu/extension/cpu_spoof.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    old = ("                        (*curr_cs_ptr)->vdso_clock_mode =\n"
+           "                            VDSO_CLOCKMODE_ARCHTIMER;\n")
+    if "OPLUS_419_CLKSRC_VDSO_MODE" not in t and old in t:
+        new = ("#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)\n"
+               "                        (*curr_cs_ptr)->vdso_clock_mode =\n"
+               "                            VDSO_CLOCKMODE_ARCHTIMER;\n"
+               "#else\n"
+               "                        /* OPLUS_419_CLKSRC_VDSO_MODE: 4.19 struct clocksource\n"
+               "                         * 无 vdso_clock_mode (5.2 引入); vDSO 时钟模式由\n"
+               "                         * arch 层固定, 无需改写 */\n"
+               "                        (void)curr_cs_ptr;\n"
+               "#endif\n")
+        t = t.replace(old, new, 1)
+        p.write_text(t)
+        patched.append("drivers/kernelsu/extension/cpu_spoof.c: clocksource->vdso_clock_mode (5.2) 加版本守卫")
+
 # 41e) fs/proc/meminfo.c 引用 ion_total 未 include 声明头
 p = pathlib.Path("fs/proc/meminfo.c")
 if p.exists():
