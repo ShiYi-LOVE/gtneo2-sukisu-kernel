@@ -11,7 +11,15 @@ ORIGINAL="$PWD"
 JOBS=$(nproc --all)
 if [ "${SKIP_SU:-0}" = "1" ]; then SUFFIX="stock"; else SUFFIX="SukiSU-susfs"; fi
 
-KERNEL_URL="https://github.com/realme-kernel-opensource/realme_GTneo2-Q5pro-GTMasterExploratory-AndroidT-kernel-source"
+KERNEL_URL="https://github.com/Blackmanx/kernel_realme_sm8250"
+# r42: 换底座。原 realme 官方 AndroidT 树里 fs/oext4、fs/erofs、fs/exfat、
+# drivers/soc/oplus、include/soc/oplus、net/oplus_modules 全是指向未开源
+# vendor/oplus/kernel_4.19/ 的失效符号链接, 需要 fs_restore + bitra 回填 +
+# kconfig 占位三套补丁才能凑齐一个完整源码树。
+# Blackmanx/kernel_realme_sm8250 是同设备社区的完整化分支 (苓茶内核就用它),
+# 上述目录全是真实源码, 且已验证可开机。分支 bigshot = 骁龙870 (GT Neo 2 /
+# 大师探索版) 在 Android 13 底包上的那一支。
+KERNEL_BRANCH="bigshot"
 SUSFS_URL="https://gitlab.com/simonpunk/susfs4ksu"
 
 export KBUILD_BUILD_USER="SukiSU"
@@ -157,19 +165,19 @@ print('  OK: 文件系统与模块配置齐全')
 PY
 }
 
-echo "==> [1/7] 拉取真我官方 Android T 内核源码 (kernel 4.19.157)..."
+echo "==> [1/7] 拉取内核源码 ($KERNEL_BRANCH 分支, kernel 4.19.157)..."
 # 预清理 (绝对路径; 保留仓库自带 ak3/ 模板目录!)
 rm -rf kernel out "$ORIGINAL/susfs" "$ORIGINAL/ak3-clone" "$ORIGINAL/bitra-ref"
 # 多源回退: 直连 -> 镜像加速 (VM/弱网环境 github 直连常被 reset)
 KERNEL_URLS=("$KERNEL_URL"
   "https://gh-proxy.com/$KERNEL_URL"
   "https://ghproxy.net/$KERNEL_URL"
-  "https://gitclone.com/github.com/realme-kernel-opensource/realme_GTneo2-Q5pro-GTMasterExploratory-AndroidT-kernel-source")
+  "https://gitclone.com/github.com/Blackmanx/kernel_realme_sm8250")
 CLONE_OK=""
 for i in 1 2 3 4 5 6; do
   u="${KERNEL_URLS[$(( (i-1) % ${#KERNEL_URLS[@]} ))]}"
-  echo "  clone 尝试 $i: $u"
-  if git clone --depth=1 "$u" kernel; then CLONE_OK="yes"; break; fi
+  echo "  clone 尝试 $i: $u (-b $KERNEL_BRANCH)"
+  if git clone --depth=1 -b "$KERNEL_BRANCH" "$u" kernel; then CLONE_OK="yes"; break; fi
   rm -rf kernel
   sleep 10
 done
@@ -267,6 +275,9 @@ echo "==> [3c2] 从社区 bitra 内核回填 Oplus 闭源组件 (system/device_i
 # realme 官方源码 drivers/soc/oplus/{system,device_info,sensor,thermal} 和 include/soc/oplus
 # 全部指向未开源 vendor 目录 (失效符号链接)。ProjectElixir bitra 内核 (同设备, 已验证可编译)
 # 补全了这些组件 —— 直接回填, 让 oplus_project.h 等头文件及其实现恢复存在
+if [ -f include/soc/oplus/system/oplus_project.h ] && [ -d drivers/soc/oplus/system ]; then
+  echo "==> [3c2] 跳过 bitra 回填: 本底座已含完整 Oplus 闭源组件 (oplus_project.h 存在)"
+else
 BITRA_URL="https://github.com/ProjectElixir-Devices/kernel_realme_sm8250-bitra"
 for i in 1 2 3 4 5 6; do
   case $(( (i-1) % 3 )) in
@@ -312,6 +323,7 @@ if [ -d ../bitra-ref ]; then
 else
   echo "!! bitra-ref 不可用，缺失组件按空 stub 处理"
 fi
+fi   # 底座自带完整 Oplus 组件时跳过上面整段回填
 
 echo "==> [3d] 自动扫描缺失头文件的 include, 删除对应 OPLUS 白名单宏..."
 python3 "$ORIGINAL/fix_oplus_macros.py" || echo "!! 宏清理脚本异常，继续构建"
