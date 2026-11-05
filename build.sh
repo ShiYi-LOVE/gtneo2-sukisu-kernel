@@ -196,12 +196,18 @@ grep -n "^CC" Makefile | head -3
 #     #ifdef 包 CONFIG 行无效, CONFIG_OPLUS_CTP/SCHED 实际从未开启)
 #   - HEALTHINFO -> ion_total()/linux/healthinfo/* (闭源)
 #     且官方 defconfig 本就未开启 CONFIG_VIRTUAL_RESERVE_MEMORY, 出厂编译时该特性守卫即为 false
-# 从白名单删除宏 = 整个功能编译跳过, 与官方出厂行为一致
-sed -i -e '/OPLUS_FEATURE_SCHED_ASSIST/d' -e '/OPLUS_FEATURE_MULTI_FREEAREA/d' \
-       -e '/OPLUS_FEATURE_PROCESS_RECLAIM/d' \
-       -e '/OPLUS_FEATURE_VIRTUAL_RESERVE_MEMORY/d' \
-       -e '/OPLUS_FEATURE_TASK_CPUSTATS/d' \
-       -e '/OPLUS_FEATURE_HEALTHINFO/d' OplusKernelEnvConfig.mk
+# 中和这些宏 = 整个功能编译跳过, 与官方出厂行为一致
+# !! 注意: 必须"改名", 不能"删行" (r42 教训) !!
+# 官方源码树里这些符号只出现在 ALLOWED_MCROS 列表中, 所以 `/符号/d` 删行没问题;
+# 但 bigshot 等第三方树里同一个符号还出现在 `ifeq ($(OPLUS_FEATURE_X),yes)` 判断里,
+# 删行会把 ifeq 行一起删掉, 只剩下面的 endif -> make 直接报
+#   OplusKernelEnvConfig.mk:208: *** extraneous 'endif'.  Stop.
+# 改名方案对两种出现位置都安全, 且逐行结构完全不变:
+#   列表项   -> 生成 -DOPLUS_DISABLED_xxx (无人引用, 无害)
+#   ifeq 判断 -> 变量永未定义, 条件恒假, 整块跳过
+for _m in SCHED_ASSIST MULTI_FREEAREA PROCESS_RECLAIM VIRTUAL_RESERVE_MEMORY TASK_CPUSTATS HEALTHINFO; do
+  sed -i "s/OPLUS_FEATURE_${_m}/OPLUS_DISABLED_${_m}/g" OplusKernelEnvConfig.mk
+done
 # SECURE_GUARD/MOUNTGUARD/EXECGUARD 三个 ifeq 块强制 export CONFIG_OPLUS_*_GUARD=y
 # 并加 -D 命令行宏 (优先级高于 .config, scripts/config -d 无法关闭):
 #   CONFIG_OPLUS_SECURE_GUARD  -> oplus_invoke_syscall (闭源)
@@ -212,7 +218,24 @@ sed -i -e '/export CONFIG_OPLUS_SECURE_GUARD/d'  -e '/DCONFIG_OPLUS_SECURE_GUARD
        -e '/export CONFIG_OPLUS_MOUNT_BLOCK/d'   -e '/DCONFIG_OPLUS_MOUNT_BLOCK/d' \
        -e '/export CONFIG_OPLUS_EXECVE_BLOCK/d'  -e '/DCONFIG_OPLUS_EXECVE_BLOCK/d' \
        -e '/DCONFIG_OPLUS_EXECVE_REPORT/d' OplusKernelEnvConfig.mk
-echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO macros removed; SECURE_GUARD/MOUNT_BLOCK/EXECVE force-exports removed"
+# 结构自检: make 的条件指令一旦不平衡就直接 "extraneous 'endif'", 报错位置飘忽难查,
+# 这里提前拦一道, 让失败信息指向真正的修改脚本而不是 make 的某一行
+python3 - <<'PYCHK' || exit 1
+import sys
+lines = open('OplusKernelEnvConfig.mk', encoding='utf-8', errors='replace').read().split('\n')
+depth = 0
+for i, l in enumerate(lines, 1):
+    s = l.strip()
+    if s.startswith(('ifeq', 'ifneq', 'ifdef', 'ifndef')):
+        depth += 1
+    elif s.startswith('endif'):
+        depth -= 1
+        if depth < 0:
+            print("FATAL: OplusKernelEnvConfig.mk 第 %d 行出现孤立 endif (补丁删行过头)" % i)
+            sys.exit(1)
+print("  OplusKernelEnvConfig.mk 条件块配平 OK (depth=%d)" % depth)
+PYCHK
+echo "OplusKernelEnvConfig.mk: SCHED_ASSIST/MULTI_FREEAREA/PROCESS_RECLAIM/VIRTUAL_RESERVE_MEMORY/TASK_CPUSTATS/HEALTHINFO renamed->disabled; SECURE_GUARD/MOUNT_BLOCK/EXECVE force-exports removed"
 
 # SKIP_SU=1 时跳过 SukiSU/SusFS, 产出纯净对照内核 (用于定位卡 logo 是否由 rootkit 引起)
 if [ "${SKIP_SU:-0}" = "1" ]; then
