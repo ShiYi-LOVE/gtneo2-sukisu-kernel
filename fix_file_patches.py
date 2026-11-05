@@ -77,9 +77,28 @@ if p.exists():
         p.write_text(t)
         patched.append("kernel/sched/cputime.c: TASK_CPUSTATS call-sites disabled")
 
-# 6) 全树兜底: 注释掉对已知闭源头文件的无条件 include
-#    (healthinfo/*, task_cpustats.h —— 对应实现/头文件均未开源)
-DEAD_HEADERS = ("#include <linux/healthinfo/", "#include <linux/task_cpustats.h>")
+# 6) 全树兜底: 注释掉对「真的不存在」的闭源头文件的无条件 include
+#    (healthinfo/*, task_cpustats.h)
+# !! r43 教训: 早期版本按路径前缀盲替, 结果在自带 include/linux/healthinfo/fg.h 的
+#    community 树上把 `#include <linux/healthinfo/fg.h>` 替换成
+#      /* #include <linux/healthinfo/ skipped: closed-source */fg.h>
+#    —— 只切掉了前缀, 剩下的 "fg.h>" 变成裸 token, clang 报 "unknown type name 'fg'",
+#    连带 is_fg() 隐式声明 (链接期必炸)。
+#    现在改成: 先解析出完整头文件名并确认文件确实不存在, 再整行注释。
+DEAD_PREFIXES = ("linux/healthinfo/", "linux/task_cpustats.h")
+INC_LINE_RE = re.compile(r'^[ \t]*#include[ \t]+<([^>]+)>[ \t]*$', re.M)
+
+
+def _header_exists(inc, src_dir):
+    cands = [inc,
+             "include/" + inc,
+             "arch/arm64/include/" + inc,
+             "include/uapi/" + inc]
+    if inc.startswith(("../", "./")):
+        cands.append((pathlib.Path(src_dir) / inc).as_posix())
+    return any(pathlib.Path(c).exists() for c in cands)
+
+
 count = 0
 for pat in ("fs/proc/*.c", "kernel/sched/*.c", "mm/*.c"):
     for f in pathlib.Path(".").glob(pat):
@@ -88,14 +107,22 @@ for pat in ("fs/proc/*.c", "kernel/sched/*.c", "mm/*.c"):
         except OSError:
             continue
         orig = t
-        for h in DEAD_HEADERS:
-            if h in t:
-                t = t.replace(h, "/* " + h + " skipped: closed-source */")
+
+        def _kill(m):
+            inc = m.group(1)
+            if not inc.startswith(DEAD_PREFIXES):
+                return m.group(0)
+            if _header_exists(inc, f.parent):
+                # 树里真有这个头 -> 一行都不许动
+                return m.group(0)
+            return "/* " + m.group(0).strip() + " skipped: header absent in this tree */"
+
+        t = INC_LINE_RE.sub(_kill, t)
         if t != orig:
             f.write_text(t)
             count += 1
 if count:
-    patched.append(f"global: commented dead-header includes in {count} file(s)")
+    patched.append(f"global: commented {count} file(s) with genuinely-absent closed-source includes")
 
 # 7) kernel/sched/fair.c: 唯一无守卫的 trace_sched_cpu_sel 调用 (fair.c 其余 sched-assist
 #    引用全在 OPLUS_FEATURE_SCHED_ASSIST 块内, 宏删除后自动失效)。该 tracepoint 定义于
