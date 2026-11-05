@@ -1326,6 +1326,58 @@ if p.exists():
             patched.append("drivers/kernelsu/supercall/dispatch.c: 补 include linux/sched/task.h "
                            "(tasklist_lock / init_task 的声明处)")
 
+# 46) 4.19 的 SELinux 策略注入层 (最大的一处架构性差异)
+#     SukiSU 的 selinux/ 与 feature/selinux_hide.c 全部建立在 5.7+ 架构上:
+#        struct selinux_policy  —— 策略是"可替换的指针" selinux_state.policy
+#        selinux_state.policy_mutex
+#        security_*_with_policy() 一族
+#     4.19 里 policydb 内联在 selinux_state.ss 中 (ss/services.h 实测):
+#        struct selinux_ss { struct sidtab *sidtab; struct policydb policydb;
+#                            rwlock_t policy_rwlock; u32 latest_granting; ... };
+#     没有可替换的指针, 也就不存在"复制-改-换指针"的写法, 只能就地修改。
+#
+#     处理方式 (KernelSU 0.9.5 在 4.14/4.19 上就是这么做的, 已实测):
+#       1. sepolicy.c/h 整份换成 0.9.5 的实现 —— 那份是同时兼容 4.14/4.19/5.x 的,
+#          ksu_* 函数名/签名与 SukiSU 完全一致 (逐条比对过 19 个符号)
+#       2. rules.c 只改两处: apply_kernelsu_rules() 与 handle_sepolicy()
+#          的"锁 + 复制策略 + 换指针"包装, 换成 rcu_read_lock + 直接改 ss->policydb,
+#          批量协议解析部分原样保留 (ksud 用同一套协议, 不能动)
+#       3. feature/selinux_hide.c 不参与编译, 换成空实现 —— 它依赖 *_with_policy
+#          与 backup_sepolicy 备份策略, 4.19 无处安放; 且它只是"反检测增强",
+#          不是 root 的必要条件
+def _kernel_vp():
+    t = pathlib.Path("Makefile").read_text(errors="ignore")
+    v = int(re.search(r"^VERSION\s*=\s*(\d+)", t, re.M).group(1))
+    p = int(re.search(r"^PATCHLEVEL\s*=\s*(\d+)", t, re.M).group(1))
+    return (v, p)
+
+
+_KVP = _kernel_vp()
+if _KVP < (5, 7) and pathlib.Path("drivers/kernelsu").is_dir():
+    _src = pathlib.Path(__file__).resolve().parent / "compat419"
+    _copied = []
+    for _dst_rel, _src_name in (
+            ("drivers/kernelsu/selinux/rules.c", "rules419.c"),
+            ("drivers/kernelsu/selinux/sepolicy.c", "sepolicy419.c"),
+            ("drivers/kernelsu/selinux/sepolicy.h", "sepolicy419.h"),
+            ("drivers/kernelsu/feature/selinux_hide_stub419.c", "selinux_hide_stub419.c")):
+        _s = _src / _src_name
+        _d = pathlib.Path(_dst_rel)
+        if _s.is_file() and _d.parent.is_dir():
+            _d.write_bytes(_s.read_bytes())
+            _copied.append(_dst_rel)
+    # Kbuild: 用空实现顶掉 selinux_hide.o
+    _kb = pathlib.Path("drivers/kernelsu/Kbuild")
+    if _kb.exists():
+        _t = _kb.read_text(errors="ignore")
+        if "feature/selinux_hide.o" in _t:
+            _t = _t.replace("feature/selinux_hide.o", "feature/selinux_hide_stub419.o")
+            _kb.write_text(_t)
+            _copied.append("Kbuild: selinux_hide.o -> selinux_hide_stub419.o")
+    if _copied:
+        patched.append("4.19 SELinux 层替换 (%d.%d < 5.7): %s"
+                       % (_KVP[0], _KVP[1], ", ".join(_copied)))
+
 # 41e) fs/proc/meminfo.c 引用 ion_total 未 include 声明头
 p = pathlib.Path("fs/proc/meminfo.c")
 if p.exists():
