@@ -1046,13 +1046,19 @@ if pkg.exists():
 #       security_inode_init_security_anon (5.13 函数)     infra/file_wrapper.c
 #     同时 bigshot 树自身也有个洞: include/linux/healthinfo/ion.h 声明了
 #     ion_total_size / ion_total(), 但树里没有任何实现 -> fs/proc/meminfo.c 引用成隐式声明
-def _insert_before_guard_end(rel_path, marker, code_block):
-    """在 include guard 的最后一个 #endif 之前插入, 避免落到 guard 外面被重复展开"""
+def _insert_before_guard_end(rel_path, marker, code_block, probe=None):
+    """在 include guard 的最后一个 #endif 之前插入, 避免落到 guard 外面被重复展开
+
+    probe: 若该字符串已存在于目标头文件, 说明这套内核本来就有此符号, 直接跳过.
+           (不同 4.19 分支回移程度不同, 必须先查再插, 否则 redefinition)
+    """
     p = pathlib.Path(rel_path)
     if not p.exists():
         return False
     t = p.read_text(errors="ignore")
     if marker in t:
+        return False
+    if probe and probe in t:
         return False
     lines = t.split("\n")
     idx = None
@@ -1075,7 +1081,8 @@ def _insert_before_guard_end(rel_path, marker, code_block):
 
 
 SHIMS = [
-    ("include/linux/compiler.h", "OPLUS_419_FALLTHROUGH",
+    # (头文件, 自身标记, 已存在探测串, 代码): 探测串命中说明这棵树本来就有, 跳过
+    ("include/linux/compiler.h", "OPLUS_419_FALLTHROUGH", "#define fallthrough",
      "/* OPLUS 4.19 COMPAT: fallthrough 语句为 5.4 引入, 此处退化为空语句 */\n"
      "#ifndef OPLUS_419_FALLTHROUGH\n"
      "#define OPLUS_419_FALLTHROUGH\n"
@@ -1083,7 +1090,7 @@ SHIMS = [
      "#define fallthrough do { } while (0)\n"
      "#endif\n"
      "#endif\n"),
-    ("include/linux/string.h", "OPLUS_419_STRSCPY_PAD",
+    ("include/linux/string.h", "OPLUS_419_STRSCPY_PAD", "strscpy_pad(",
      "/* OPLUS 4.19 COMPAT: strscpy_pad 为 5.1 引入 */\n"
      "#ifndef OPLUS_419_STRSCPY_PAD\n"
      "#define OPLUS_419_STRSCPY_PAD\n"
@@ -1100,8 +1107,9 @@ SHIMS = [
      "\treturn written;\n"
      "}\n"
      "#endif\n"),
-    ("include/linux/mm.h", "OPLUS_419_KVCALLOC",
-     "/* OPLUS 4.19 COMPAT: kvcalloc 为 5.1 引入 */\n"
+    # kvcalloc 其实是 4.18 引入, 4.19 通常已有 (bigshot 在 mm.h:3058); 探测串命中就跳过
+    ("include/linux/mm.h", "OPLUS_419_KVCALLOC", "kvcalloc(",
+     "/* OPLUS 4.19 COMPAT: kvcalloc (4.18+) 缺失时补一份 */\n"
      "#ifndef OPLUS_419_KVCALLOC\n"
      "#define OPLUS_419_KVCALLOC\n"
      "static inline void *kvcalloc(size_t n, size_t size, gfp_t flags)\n"
@@ -1109,7 +1117,7 @@ SHIMS = [
      "\treturn kvmalloc_array(n, size, flags | __GFP_ZERO);\n"
      "}\n"
      "#endif\n"),
-    ("include/linux/uaccess.h", "OPLUS_419_NOFAULT",
+    ("include/linux/uaccess.h", "OPLUS_419_NOFAULT", "copy_to_kernel_nofault",
      "/* OPLUS 4.19 COMPAT: nofault 系列 (5.8) 与 untagged_addr (5.4) 回落到 4.19 等价实现 */\n"
      "#ifndef OPLUS_419_NOFAULT\n"
      "#define OPLUS_419_NOFAULT\n"
@@ -1124,9 +1132,11 @@ SHIMS = [
      "#endif\n"
      "#endif\n"),
 ]
-for _rel, _mark, _code in SHIMS:
-    if _insert_before_guard_end(_rel, _mark, _code):
+for _rel, _mark, _probe, _code in SHIMS:
+    if _insert_before_guard_end(_rel, _mark, _code, _probe):
         patched.append(f"{_rel}: 4.19 缺失 API shim ({_mark})")
+    else:
+        print(f"  skip shim {_mark}: {_rel} 已自带或已打过")
 
 # 41b) allowlist.c 用 put_task_struct (4.19 为 sched/task.h 的 static inline)
 #      以及 strscpy_pad (shim 在 string.h), 两者都要显式 include 才拿得到
