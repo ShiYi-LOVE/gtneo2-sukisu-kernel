@@ -1219,8 +1219,24 @@ if p.exists():
         patched.append("drivers/kernelsu/infra/file_wrapper.c: security_inode_init_security_anon (5.13) 加版本守卫")
 
 # 41d) bigshot 树自身缺口: healthinfo/ion.h 声明了 ion_total_size / ion_total(), 树内无实现
+#     注意 (r56): bigshot 有 drivers/staging/android/ion/ion/oppo_ion.c, 里面既有
+#     `atomic_long_t ion_total_size` 又有 `unsigned long ion_total(void)` —— 与第 21/29 步
+#     同一个坑: 为官方树补的"符号提供者"在社区树上本来就存在, 再补一次就是 link 期
+#     duplicate symbol。所以先全树探测提供者, 有则跳过。
+_ion_provider = None
+for _p in pathlib.Path("drivers/staging/android/ion").rglob("*.c"):
+    if _p.name == "ion.c":
+        continue
+    _t = _p.read_text(errors="ignore")
+    if ("ion_total(void)" in _t) or ("atomic_long_t ion_total_size" in _t):
+        _ion_provider = str(_p)
+        break
+
 p = pathlib.Path("drivers/staging/android/ion/ion.c")
-if p.exists():
+if _ion_provider:
+    patched.append(f"drivers/staging/android/ion/ion.c: 跳过补 ion_total "
+                   f"({_ion_provider} 已提供, 再定义会 duplicate symbol)")
+elif p.exists():
     t = p.read_text(errors="ignore")
     if "OPLUS_419_ION_TOTAL_IMPL" not in t:
         t += ("\n/* OPLUS 4.19 COMPAT: include/linux/healthinfo/ion.h 声明了这两个符号,\n"
