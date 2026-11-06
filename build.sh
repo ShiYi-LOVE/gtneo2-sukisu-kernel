@@ -130,6 +130,15 @@ configure_kernel() {
   # 我们没有 realme 的签名私钥, MODULE_SIG_FORCE=y 会拒绝加载所有原厂 vendor 模块。
   ./scripts/config --file out/.config -e MODULE_SIG || true
   ./scripts/config --file out/.config -d MODULE_SIG_FORCE || true
+  # === 关闭调试信息 (r58) ===
+  # 原厂 defconfig 带 CONFIG_DEBUG_INFO=y, 编出来的 Image 是 51.8MB;
+  # 原厂 boot.img 里 kernel 段只有 44.9MB, boot 分区 64MB —— repack 后
+  # 68.6MB 直接超出分区容量, 刷不进去 (fastboot boot 也会报 too large)。
+  # 去掉 DWARF 不影响任何内核行为, Image 会掉到 ~40MB, 稳稳塞进分区。
+  ./scripts/config --file out/.config -d DEBUG_INFO || true
+  ./scripts/config --file out/.config -d DEBUG_INFO_REDUCED || true
+  ./scripts/config --file out/.config -d DEBUG_INFO_SPLIT || true
+  ./scripts/config --file out/.config -d DEBUG_INFO_DWARF4 || true
   make O=out ARCH=arm64 olddefconfig
 
   # === 硬性断言 (r34) ===
@@ -472,6 +481,16 @@ assert d[0x38:0x3c] == b'ARM\x64', 'FATAL: 不是标准 ARM64 Image'
 assert d.rfind(b'\xd0\x0d\xfe\xed') < 0, 'FATAL: Image 内部混入了 dtb'
 print('  Image 校验通过: %d 字节 (%.1f MB), ARM64 魔数 OK, 无内嵌 dtb'
       % (len(d), len(d) / 1048576))
+# --- boot 分区容量校验 (r58) ---
+# boot.img v2 布局: 4096 头 + align(kernel,4096) + align(ramdisk 1078864,4096)
+#                  + align(dtb 15814984,4096); 分区实测 dd 大小 64MiB (67108864)
+PART = 67108864
+TOTAL = 4096 + (len(d) + 4095) // 4096 * 4096 + 1081344 + 15814656
+print('  预计 boot.img 体积: %.1f MB / 分区 64.0 MB' % (TOTAL / 1048576))
+if TOTAL > PART:
+    raise SystemExit('FATAL: 内核过大, 重打包后 %.1fMB 超出 boot 分区 64MB'
+                     % (TOTAL / 1048576))
+print('  OK: 能塞进 boot 分区')
 PY
 
 # --- vermagic 逐字校验: 必须与 /vendor/lib/modules/*.ko 的 vermagic 完全一致,
