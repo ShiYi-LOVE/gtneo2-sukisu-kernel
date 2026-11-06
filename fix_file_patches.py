@@ -1166,6 +1166,14 @@ SHIMS = [
      "#ifndef untagged_addr\n"
      "#define untagged_addr(addr) (addr)\n"
      "#endif\n"
+     # r57: probe_user_read/probe_user_write 是本树(OPPO 回移)真实存在且已 EXPORT 的
+     # (mm/maccess.c:73/126, uaccess.h:324/347), 语义与 5.8 的 copy_*_user_nofault 一致
+     "#ifndef copy_from_user_nofault\n"
+     "#define copy_from_user_nofault(dst, src, size) probe_user_read(dst, src, size)\n"
+     "#endif\n"
+     "#ifndef copy_to_user_nofault\n"
+     "#define copy_to_user_nofault(dst, src, size) probe_user_write(dst, src, size)\n"
+     "#endif\n"
      "#endif\n"),
 ]
 for _rel, _mark, _probe, _code in SHIMS:
@@ -1438,6 +1446,139 @@ if p.exists():
                       "#include <linux/swap.h>\n#include <linux/healthinfo/ion.h>", 1)
         p.write_text(t)
         patched.append("fs/proc/meminfo.c: 补 include <linux/healthinfo/ion.h>")
+
+# 47) r56 链接期 undefined symbol: selinux_inode / selinux_cred
+#     SukiSU 用的是 5.7+ 的访问器命名 (security/selinux/hooks.c 里那套),
+#     4.19 的 objsec.h 只有结构体定义, 没有访问器, 直接 inode->i_security / cred->security
+p = pathlib.Path("security/selinux/include/objsec.h")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "OPLUS_419_OBJSEC_ACCESSOR" not in t:
+        add = ("/* OPLUS 4.19 COMPAT: 5.7+ 把访问器改名成 selinux_inode()/selinux_cred(),\n"
+               " * 4.19 只有裸字段 inode->i_security / cred->security (均为 void *)\n"
+               " * 引用方: drivers/kernelsu/selinux/{inode.c,selinux.c}\n"
+               " */\n"
+               "#include <linux/cred.h>\n"
+               "#ifndef OPLUS_419_OBJSEC_ACCESSOR\n"
+               "#define OPLUS_419_OBJSEC_ACCESSOR\n"
+               "static inline struct inode_security_struct *selinux_inode(const struct inode *inode)\n"
+               "{\n"
+               "\treturn (struct inode_security_struct *)inode->i_security;\n"
+               "}\n"
+               "static inline struct task_security_struct *selinux_cred(const struct cred *cred)\n"
+               "{\n"
+               "\treturn (struct task_security_struct *)cred->security;\n"
+               "}\n"
+               "#endif\n\n")
+        if "#endif /* _SELINUX_OBJSEC_H_ */" in t:
+            t = t.replace("#endif /* _SELINUX_OBJSEC_H_ */",
+                          add + "#endif /* _SELINUX_OBJSEC_H_ */", 1)
+            p.write_text(t)
+            patched.append("security/selinux/include/objsec.h: 补 selinux_inode()/selinux_cred() "
+                           "访问器 (5.7+ 改名, 4.19 只有裸字段)")
+
+# 48) dispatch.c 的 task_pgrp / task_session 未声明 —— 它们在
+#     include/linux/sched/signal.h:610/615 (static inline), 而 dispatch.c 只引入了
+#     sched/task.h (tasklist_lock / init_task), 拿不到这两个
+p = pathlib.Path("drivers/kernelsu/supercall/dispatch.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "linux/sched/signal.h" not in t:
+        for anchor in ("#include <linux/thread_info.h>",
+                       "#include <linux/sched/task.h>",
+                       "#include <linux/cred.h>"):
+            if anchor in t:
+                t = t.replace(anchor, anchor + "\n#include <linux/sched/signal.h>", 1)
+                p.write_text(t)
+                patched.append("drivers/kernelsu/supercall/dispatch.c: 补 include "
+                               "linux/sched/signal.h (task_pgrp/task_session 声明处)")
+                break
+
+# 49) susfs4ksu 内核侧期望 KSU 提供的 4 个符号 (upstream 由
+#     kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch 注入, 但那是按
+#     KernelSU 0.9.x 的文件结构写的, SukiSU 重排过目录, 补丁打不上)
+#       fs/namespace.c -> susfs_is_current_ksu_domain / susfs_is_current_zygote_domain
+#       fs/namespace.c -> susfs_try_umount_all
+#       fs/susfs.c     -> ksu_try_umount(mnt, check_mnt, flags, uid)
+#     直接补在 feature/kernel_umount.c 末尾: 那里已有 kern_path/ksu_umount_mnt/
+#     selinux.h 的 include, 不必新建对象文件再造一套 include 依赖
+p = pathlib.Path("drivers/kernelsu/feature/kernel_umount.c")
+if p.exists():
+    t = p.read_text(errors="ignore")
+    if "OPLUS_419_SUSFS_KSU_GLUE" not in t:
+        glue = r'''
+/* ===== OPLUS_419_SUSFS_KSU_GLUE =====
+ * susfs 的 fs/susfs.c 与 fs/namespace.c 以 extern 引用下面 4 个符号,
+ * 期望由 KSU 侧提供 (KernelSU 由 10_enable_susfs_for_ksu.patch 注入)。
+ * SukiSU 的文件布局与那份补丁不同, 这里按等价语义补最小实现。
+ */
+#include <linux/string.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+#endif
+#ifndef MNT_DETACH
+#define MNT_DETACH 2
+#endif
+
+bool susfs_is_current_ksu_domain(void)
+{
+    return is_ksu_domain();
+}
+
+bool susfs_is_current_zygote_domain(void)
+{
+    return is_zygote(current_cred());
+}
+
+void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
+{
+    struct path path;
+
+    (void)uid;
+
+    if (kern_path(mnt, 0, &path))
+        return;
+
+    if (check_mnt) {
+        const char *fstype = NULL;
+
+        if (path.mnt && path.mnt->mnt_sb && path.mnt->mnt_sb->s_type)
+            fstype = path.mnt->mnt_sb->s_type->name;
+        /* 与原实现一致: 只动 overlay (KSU 模块的挂载) */
+        if (!fstype || strcmp(fstype, "overlay") != 0) {
+            path_put(&path);
+            return;
+        }
+    }
+
+    if (path.dentry != path.mnt->mnt_root) {
+        path_put(&path);
+        return;
+    }
+
+    ksu_umount_mnt(mnt, &path, flags);
+    path_put(&path);
+}
+
+void susfs_try_umount_all(uid_t uid)
+{
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+    susfs_try_umount(uid);
+#endif
+    ksu_try_umount("/system", true, 0, uid);
+    ksu_try_umount("/system_ext", true, 0, uid);
+    ksu_try_umount("/vendor", true, 0, uid);
+    ksu_try_umount("/product", true, 0, uid);
+    ksu_try_umount("/odm", true, 0, uid);
+    /* 循环设备判不出 dev_name, 直接按挂载点处理 */
+    ksu_try_umount("/data/adb/modules", false, MNT_DETACH, uid);
+    ksu_try_umount("/debug_ramdisk", true, MNT_DETACH, uid);
+}
+/* ===== OPLUS_419_SUSFS_KSU_GLUE end ===== */
+'''
+        p.write_text(t + glue)
+        patched.append("drivers/kernelsu/feature/kernel_umount.c: 补 susfs KSU 侧 4 个符号 "
+                       "(is_current_ksu/zygote_domain, susfs_try_umount_all, ksu_try_umount 4 参)")
 
 for line in patched:
     print(f"  patched: {line}")
