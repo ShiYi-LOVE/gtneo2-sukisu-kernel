@@ -131,14 +131,22 @@ configure_kernel() {
   ./scripts/config --file out/.config -e MODULE_SIG || true
   ./scripts/config --file out/.config -d MODULE_SIG_FORCE || true
   # === 关闭调试信息 (r58) ===
-  # 原厂 defconfig 带 CONFIG_DEBUG_INFO=y, 编出来的 Image 是 51.8MB;
-  # 原厂 boot.img 里 kernel 段只有 44.9MB, boot 分区 64MB —— repack 后
-  # 68.6MB 直接超出分区容量, 刷不进去 (fastboot boot 也会报 too large)。
-  # 去掉 DWARF 不影响任何内核行为, Image 会掉到 ~40MB, 稳稳塞进分区。
+  # 原厂 defconfig 带 CONFIG_DEBUG_INFO=y。注意: arm64 的 Image 是 objcopy 出来的,
+  # 只含 SHF_ALLOC 段, DWARF 根本不会进 Image —— r58 实测关了之后 Image 字节数
+  # 一分未变 (51,855,424)。所以这一步只是让 vmlinux 小一点, 不解决容量问题。
   ./scripts/config --file out/.config -d DEBUG_INFO || true
   ./scripts/config --file out/.config -d DEBUG_INFO_REDUCED || true
   ./scripts/config --file out/.config -d DEBUG_INFO_SPLIT || true
   ./scripts/config --file out/.config -d DEBUG_INFO_DWARF4 || true
+  # === 容量: boot 分区只留 3MB 余量 (r59) ===
+  # 原厂 boot.img: 头 4K + kernel 44.9MB + ramdisk 1.0MB + dtb 15.1MB = 61MB。
+  # 若分区就是 64MB, kernel 段上限只有 47.9MB, 而我们的 Image 是 49.5MB
+  # (KSU+susfs 与兼容层带来的 +10%) —— 超 1.6MB。
+  # Image 里没有 DWARF 可减, 只能减代码密度: 改走 -Os (体积优先)。
+  # -Os 对体积的效果通常 -6~-8% -> 46MB 左右, 稳稳落在 47.9MB 以内。
+  # 代价是少量运行性能, 先保证能刷进去能开机; 若实测分区 >64MB 可再切回 -O2。
+  ./scripts/config --file out/.config -e CC_OPTIMIZE_FOR_SIZE || true
+  ./scripts/config --file out/.config -d CC_OPTIMIZE_FOR_PERFORMANCE || true
   make O=out ARCH=arm64 olddefconfig
 
   # === 硬性断言 (r34) ===
@@ -485,8 +493,11 @@ print('  Image 校验通过: %d 字节 (%.1f MB), ARM64 魔数 OK, 无内嵌 dtb
 # boot.img v2 布局: 4096 头 + align(kernel,4096) + align(ramdisk 1078864,4096)
 #                  + align(dtb 15814984,4096); 分区实测 dd 大小 64MiB (67108864)
 PART = 67108864
-TOTAL = 4096 + (len(d) + 4095) // 4096 * 4096 + 1081344 + 15814656
-print('  预计 boot.img 体积: %.1f MB / 分区 64.0 MB' % (TOTAL / 1048576))
+FIXED = 4096 + 1081344 + 15814656
+KALIGN = (len(d) + 4095) // 4096 * 4096
+TOTAL = FIXED + KALIGN
+print('  boot 分区 64.0 MB; kernel 段 %.1f MB, 可用上限 %.1f MB (余量 %+d 字节)'
+      % (KALIGN / 1048576, (PART - FIXED) / 1048576, PART - TOTAL))
 if TOTAL > PART:
     raise SystemExit('FATAL: 内核过大, 重打包后 %.1fMB 超出 boot 分区 64MB'
                      % (TOTAL / 1048576))
