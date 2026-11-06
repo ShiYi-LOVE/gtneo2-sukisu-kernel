@@ -491,8 +491,23 @@ if p.exists():
 # 21) drivers/soc/qcom/oplus_watchdog_util.c: cpu_idle_pc_state (extern 数组, 提供者
 #     在闭源 cpuidle 驱动) -> 本地定义全零数组 (永远不视为 PC 空闲, 仅影响
 #     watchdog 调试 ping mask 的收缩范围)
+# !!! 仅在树里"真的没人提供"这个符号时才补 !!!
+# bigshot 的 watchdog_v2.c 里有:
+#     #ifndef OPLUS_BUG_STABILITY / static int cpu_idle_pc_state[NR_CPUS];
+#     #else                           / int cpu_idle_pc_state[NR_CPUS]; / #endif
+# 而 OplusKernelEnvConfig.mk 会 -DOPLUS_BUG_STABILITY, 所以它走 #else 提供了全局定义。
+# 这时再在 oplus_watchdog_util.c 里本地定义一次, 链接期就是
+#   ld.lld: error: duplicate symbol: cpu_idle_pc_state   (r54 实测)
 p = pathlib.Path("drivers/soc/qcom/oplus_watchdog_util.c")
-if p.exists():
+_wd = pathlib.Path("drivers/soc/qcom/watchdog_v2.c")
+_provided = False
+if _wd.exists():
+    for _ln in _wd.read_text(errors="ignore").splitlines():
+        # 全局定义形如 "int cpu_idle_pc_state[NR_CPUS];" (顶格, 无 static)
+        if _ln.startswith("int cpu_idle_pc_state"):
+            _provided = True
+            break
+if p.exists() and not _provided:
     t = p.read_text(errors="ignore")
     old = "extern int cpu_idle_pc_state[NR_CPUS];"
     if old in t:
@@ -500,6 +515,9 @@ if p.exists():
             "int cpu_idle_pc_state[NR_CPUS]; /* local zeroed: closed-source cpuidle provider */", 1)
         p.write_text(t)
         patched.append("drivers/soc/qcom/oplus_watchdog_util.c: cpu_idle_pc_state defined locally (zeroed)")
+elif p.exists() and _provided:
+    patched.append("drivers/soc/qcom/oplus_watchdog_util.c: 跳过本地定义 "
+                   "(watchdog_v2.c 已提供全局 cpu_idle_pc_state, 再定义会 duplicate symbol)")
 
 # 22) drivers/soc/qcom/subsys-pil-tz.c log_failure_reason: oplus_kevent_fb_str /
 #     mdmreason_set (崩溃遥测, 提供者闭源) -> 中性化 (仅影响遥测上报)
@@ -600,8 +618,22 @@ if p.exists():
 #     qpnp-smb5.o smb5-lib.o (被闭源 oplus 充电驱动替代), 但 schgm-flash.o 仍在构建且
 #     依赖 smblib_* (定义于 smb5-lib.c, 开源存在) -> 回补两个目标, qcom stock 充电栈
 #     恢复链接 (probe 由 DT 决定, 无节点则不运行)
+# !!! 只在树里没有 oplus 充电驱动时才补 !!!
+# bigshot 带 drivers/power/oplus/v1/charger_ic/oplus_battery_msm8250.c, 它自己又实现了
+# 一整套 smblib_read/write/masked_write... , 回补后链接期直接
+#   ld.lld: error: duplicate symbol: smblib_read  (smb5-lib.o vs oplus_battery_msm8250.o)
 p = pathlib.Path("drivers/power/supply/qcom/Makefile")
-if p.exists():
+_oplus_smb = False
+_oplus_dir = pathlib.Path("drivers/power/oplus")
+if _oplus_dir.is_dir():
+    for _f in _oplus_dir.rglob("*.c"):
+        try:
+            if "smblib_read" in _f.read_text(errors="ignore"):
+                _oplus_smb = True
+                break
+        except OSError:
+            pass
+if p.exists() and not _oplus_smb:
     t = p.read_text(errors="ignore")
     old = "obj-$(CONFIG_QPNP_SMB5)\t\t+= step-chg-jeita.o battery.o pmic-voter.o storm-watch.o schgm-flash.o\n"
     if old in t:
@@ -609,6 +641,9 @@ if p.exists():
             "obj-$(CONFIG_QPNP_SMB5)\t\t+= step-chg-jeita.o battery.o pmic-voter.o storm-watch.o schgm-flash.o qpnp-smb5.o smb5-lib.o\n", 1)
         p.write_text(t)
         patched.append("drivers/power/supply/qcom/Makefile: + qpnp-smb5.o smb5-lib.o restored")
+elif _oplus_smb:
+    patched.append("drivers/power/supply/qcom/Makefile: 跳过回补 "
+                   "(OPPO 充电驱动自带 smblib_*, 再补 smb5-lib.o 会 duplicate symbol)")
 
 # 30) drivers/esoc/esoc-mdm-4x.c: mdmreason_set (modem 重启原因记录, 实现闭源;
 #     第 2 个调用方, 第 29 轮 subsys-pil-tz.c 已处理第 1 个) -> 中性化,
